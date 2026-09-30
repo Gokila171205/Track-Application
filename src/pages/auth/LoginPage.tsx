@@ -15,7 +15,7 @@ export const LoginPage: React.FC = () => {
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   // Target destination after login
-  const from = (location.state as any)?.from?.pathname || '/applicant/dashboard';
+  const from = (location.state as any)?.from?.pathname;
 
   const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
@@ -33,7 +33,15 @@ export const LoginPage: React.FC = () => {
       if (user.role === 'ADMIN') {
         navigate('/admin');
       } else {
-        navigate(from === '/login' || from === '/signup' ? '/applicant/dashboard' : from);
+        // Redirect applicant to Scheme Discovery (/schemes) on login
+        const isDefaultOrAuthPath =
+          !from ||
+          from === '/login' ||
+          from === '/signup' ||
+          from === '/applicant/dashboard' ||
+          from === '/dashboard';
+        const target = isDefaultOrAuthPath ? '/schemes' : from;
+        navigate(target);
       }
     } catch (err: any) {
       if (

@@ -35,13 +35,20 @@ class DocumentMetadata(BaseModel):
     download_url: Optional[str] = None
     ocr_processed: bool = False
     detected_document_type: Optional[str] = None
-    classification_confidence: Optional[float] = None
     verification_status: Optional[str] = None
     verification_message: Optional[str] = None
+    file_exists: bool = True
+    rejection_reason: Optional[str] = None
+    verified_by: Optional[str] = None
+    verified_at: Optional[datetime] = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
     class Config:
         from_attributes = True
+
+class DocumentVerifyPayload(BaseModel):
+    status: Optional[str] = Field("VERIFIED", description="Target status: VERIFIED or REJECTED")
+    reason: Optional[str] = Field(None, description="Mandatory if status is REJECTED")
 
 class DocumentUploadResponse(BaseModel):
     document_id: str
@@ -59,14 +66,28 @@ class DocumentUploadResponse(BaseModel):
     message: str = "Document uploaded, verified with OCR, and binary securely stored."
     uploaded_at: datetime = Field(default_factory=datetime.utcnow)
 
+class ExplainableIssue(BaseModel):
+    status: str = "ERROR" # ERROR | WARNING | VALID
+    category: str # DOCUMENT_TYPE_MISMATCH, DOCUMENT_EXPIRED, UNABLE_TO_VERIFY_VALIDITY, NAME_MISMATCH, DOB_MISMATCH, ID_MISMATCH, DOCUMENT_QUALITY, FILE_SIZE, FILE_FORMAT, CORRUPTED_FILE, MISSING_DOCUMENT, FIELD_REQUIRED, PHONE_FORMAT, PHONE_DUPLICATE, EMAIL_FORMAT, EMAIL_DUPLICATE
+    field_id: Optional[str] = None
+    what_is_wrong: str
+    why_is_wrong: str
+    expected: str
+    provided: str
+    action: str
+    summary: Optional[str] = None
+    details: Dict[str, Any] = {}
+
 class DocumentTypeVerificationResponse(BaseModel):
     success: bool
     required_document_type: str
     detected_document_type: Optional[str] = None
-    match_status: VerificationStatus
+    match_status: str
     confidence: float
     message: str
     is_acceptable: bool
     character_count: int
     detected_keywords: List[str] = []
-    extracted_fields: Dict[str, Optional[str]] = {}
+    extracted_fields: Dict[str, Any] = {}
+    explainable_issue: Optional[ExplainableIssue] = None
+

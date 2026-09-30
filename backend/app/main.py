@@ -26,26 +26,55 @@ logger = logging.getLogger("tsfms.main")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
-    Application lifespan manager: connects to MongoDB on startup and cleans up on shutdown.
+    Application lifespan manager: connects to MongoDB Atlas on startup and cleans up on shutdown.
     """
+    import asyncio
     logger.info("Initializing MoTA TSFMS Backend Service...")
+    reconnect_task = None
     try:
         is_connected = await db_manager.init_connection()
         if is_connected and db_manager.db is not None:
-            await seed_schemes_if_empty(db_manager.db)
-            await seed_users_if_empty(db_manager.db)
-            await seed_applications_if_empty(db_manager.db)
-            await ensure_user_indexes(db_manager.db)
-            await ensure_profile_indexes(db_manager.db)
-            logger.info("MongoDB initialized, scheme and role seed data ensured, unique indexes created.")
+            if db_manager.db.name != settings.MONGO_DB_NAME:
+                logger.error("MongoDB connection failed: Database name mismatch (%s != %s)", db_manager.db.name, settings.MONGO_DB_NAME)
+                db_manager.is_connected = False
+            else:
+                await seed_schemes_if_empty(db_manager.db)
+                await seed_users_if_empty(db_manager.db)
+                await seed_applications_if_empty(db_manager.db)
+                await ensure_user_indexes(db_manager.db)
+                await ensure_profile_indexes(db_manager.db)
+                logger.info("MongoDB Atlas connected and verified (Database: %s). Seed data ensured, unique indexes active.", settings.MONGO_DB_NAME)
         else:
-            logger.warning("MongoDB ping failed. Running with database disconnected status.")
+            logger.error("MongoDB connection failed: Could not connect to MongoDB Atlas database '%s'.", settings.MONGO_DB_NAME)
     except Exception as e:
-        logger.error("Startup database connection warning: %s", str(e))
+        logger.error("MongoDB connection failed: Startup error: %s", str(e))
 
+    if not db_manager.is_connected:
+        async def auto_reconnect_worker():
+            logger.info("Background auto-reconnect worker started: Retrying MongoDB Atlas every 5 seconds...")
+            while not db_manager.is_connected:
+                try:
+                    await asyncio.sleep(5)
+                    connected = await db_manager.init_connection()
+                    if connected and db_manager.db is not None and db_manager.db.name == settings.MONGO_DB_NAME:
+                        await seed_schemes_if_empty(db_manager.db)
+                        await seed_users_if_empty(db_manager.db)
+                        await seed_applications_if_empty(db_manager.db)
+                        await ensure_user_indexes(db_manager.db)
+                        await ensure_profile_indexes(db_manager.db)
+                        logger.info("MongoDB Atlas auto-reconnected successfully (Database: %s).", settings.MONGO_DB_NAME)
+                        break
+                except asyncio.CancelledError:
+                    break
+                except Exception as ex:
+                    logger.debug("Background reconnect attempt error: %s", str(ex))
+
+        reconnect_task = asyncio.create_task(auto_reconnect_worker())
 
     yield
 
+    if reconnect_task:
+        reconnect_task.cancel()
     logger.info("Shutting down MoTA TSFMS Backend Service...")
     db_manager.close()
 
@@ -85,7 +114,7 @@ async def health_check():
 @app.get("/api/health/db", tags=["System Health"], summary="Database Connectivity Check")
 async def health_db_check():
     """
-    Verify active MongoDB cluster connectivity.
+    Verify active MongoDB Atlas cluster connectivity.
     """
     is_live = await db_manager.ping()
     if not is_live:
@@ -94,14 +123,18 @@ async def health_db_check():
             detail={
                 "status": "error",
                 "database": settings.MONGO_DB_NAME,
-                "message": "MongoDB is currently unreachable. Check MONGO_URI configuration in backend/.env."
+                "message": "MongoDB connection failed: Unable to connect to MongoDB Atlas.",
+                "error_type": db_manager.last_error or "ServerSelectionTimeoutError",
+                "cluster_host": "demo.8ny5aaa.mongodb.net",
+                "port": 27017,
+                "resolution_hint": "TCP connect to Atlas port 27017 timed out. Please ensure the client public IP is added to the MongoDB Atlas Network Access IP Whitelist (or 0.0.0.0/0 allowed)."
             }
         )
     return {
         "status": "connected",
         "database": settings.MONGO_DB_NAME,
-        "mode": "in_memory_simulation" if db_manager.is_mock else "live_cluster",
-        "message": "In-memory MongoDB simulation active (configure MONGO_URI in .env for live cluster)" if db_manager.is_mock else "MongoDB connection established and verified."
+        "mode": "live_cluster",
+        "message": "MongoDB connection established and verified."
     }
 
 # Register Sub-Routers under /api

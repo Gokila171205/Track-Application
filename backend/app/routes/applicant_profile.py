@@ -16,6 +16,7 @@ from app.services.identity_validator import (
     validate_phone,
     mask_aadhaar
 )
+from app.services.application_service import get_or_create_applicant_id
 
 router = APIRouter(prefix="/applicant", tags=["Applicant Profile"])
 
@@ -25,6 +26,7 @@ async def ensure_profile_indexes(db: AsyncIOMotorDatabase):
     """
     try:
         await db["applicant_profiles"].create_index("user_id", unique=True)
+        await db["applicant_profiles"].create_index("applicant_id", unique=True, sparse=True)
         await db["applicant_profiles"].create_index("aadhaar_hash", unique=True, sparse=True)
         await db["applicant_profiles"].create_index("phone", unique=True, sparse=True)
     except Exception as e:
@@ -38,6 +40,7 @@ async def get_applicant_profile(
     """
     Retrieve saved applicant profile for the currently authenticated citizen.
     Returns 404 if this is a first-time applicant who has not yet created a profile.
+    Maintains permanent applicant_id across all operations.
     """
     user_id = current_user["_id"]
     profile = await db["applicant_profiles"].find_one({"user_id": user_id})
@@ -47,8 +50,15 @@ async def get_applicant_profile(
             detail="No applicant profile registered for this citizen. Please complete first-time profile creation."
         )
 
+    # Ensure permanent applicant_id is present
+    applicant_id = profile.get("applicant_id")
+    if not applicant_id:
+        applicant_id = await get_or_create_applicant_id(db, user_id)
+        profile["applicant_id"] = applicant_id
+
     return ApplicantProfileResponse(
         user_id=profile["user_id"],
+        applicant_id=applicant_id,
         full_name=profile["full_name"],
         father_or_husband_name=profile.get("father_or_husband_name"),
         gender=profile.get("gender", "FEMALE"),
@@ -113,10 +123,14 @@ async def create_applicant_profile(
             detail="This phone number is already associated with another applicant account."
         )
 
-    # 6. Construct and persist profile record
+    # 6. Generate or resolve permanent Applicant ID
+    applicant_id = await get_or_create_applicant_id(db, user_id, preferred_id=profile_in.applicant_id)
+
+    # 7. Construct and persist profile record
     profile_doc = {
         "_id": user_id,
         "user_id": user_id,
+        "applicant_id": applicant_id,
         "full_name": profile_in.full_name,
         "father_or_husband_name": profile_in.father_or_husband_name,
         "gender": profile_in.gender,
@@ -137,7 +151,7 @@ async def create_applicant_profile(
 
     await db["applicant_profiles"].insert_one(profile_doc)
 
-    # 7. Record statutory audit trail (Notice: Never logs raw Aadhaar)
+    # 8. Record statutory audit trail (Notice: Never logs raw Aadhaar)
     audit_entry = {
         "id": "AUD-" + uuid.uuid4().hex[:8].upper(),
         "timestamp": now,
@@ -145,13 +159,14 @@ async def create_applicant_profile(
         "role": current_user.get("role", "APPLICANT"),
         "action": "APPLICANT_PROFILE_CREATED",
         "application_id": "PROFILE",
-        "remarks": f"Citizen profile created with verified Aadhaar {masked_aadhaar} and mobile {valid_phone}.",
+        "remarks": f"Citizen profile created with Applicant ID {applicant_id}, verified Aadhaar {masked_aadhaar} and mobile {valid_phone}.",
         "ip_address": "127.0.0.1"
     }
     await db["audit_logs"].insert_one(audit_entry)
 
     return ApplicantProfileResponse(
         user_id=profile_doc["user_id"],
+        applicant_id=applicant_id,
         full_name=profile_doc["full_name"],
         father_or_husband_name=profile_doc.get("father_or_husband_name"),
         gender=profile_doc.get("gender", "FEMALE"),
@@ -177,7 +192,8 @@ async def update_applicant_profile(
 ):
     """
     Update saved applicant profile fields.
-    Aadhaar number is immutable once verified.
+    Aadhaar number and Applicant ID are immutable once verified.
+    Does NOT modify historical submitted application records.
     """
     user_id = current_user["_id"]
     now = datetime.now(timezone.utc)
@@ -188,6 +204,9 @@ async def update_applicant_profile(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Profile not found. Please create your applicant profile first."
         )
+
+    # Ensure applicant_id is present
+    applicant_id = existing.get("applicant_id") or await get_or_create_applicant_id(db, user_id)
 
     updates = {"updated_at": now}
 
@@ -235,13 +254,14 @@ async def update_applicant_profile(
         "role": current_user.get("role", "APPLICANT"),
         "action": "APPLICANT_PROFILE_UPDATED",
         "application_id": "PROFILE",
-        "remarks": "Applicant profile information updated.",
+        "remarks": f"Applicant profile updated for Applicant ID {applicant_id}.",
         "ip_address": "127.0.0.1"
     }
     await db["audit_logs"].insert_one(audit_entry)
 
     return ApplicantProfileResponse(
         user_id=updated["user_id"],
+        applicant_id=applicant_id,
         full_name=updated["full_name"],
         father_or_husband_name=updated.get("father_or_husband_name"),
         gender=updated.get("gender", "FEMALE"),
@@ -262,24 +282,50 @@ async def update_applicant_profile(
 @router.get("/reusable-documents", response_model=List[ReusableDocumentItem])
 @router.get("/documents/reusable", response_model=List[ReusableDocumentItem])
 async def get_reusable_documents(
+    scheme_id: Optional[str] = None,
     current_user: dict = Depends(get_current_user),
     db: AsyncIOMotorDatabase = Depends(get_database)
 ):
     """
     Retrieve previously uploaded, active, and verified certificates belonging to this applicant.
-    Groups by document type to return the most recently uploaded valid document for each type.
+    Evaluates:
+    - Document type
+    - Verification status
+    - Required Financial Year validity (e.g. FY 2025-26 vs older FY 2024-25)
+    - Permanent caste/ST validity vs annual certificates
     """
     user_id = current_user["_id"]
 
     cursor = db["documents"].find({
         "user_id": user_id,
-        "is_active": {"$ne": False},
-        "status": {"$nin": ["SUPERSEDED", "REJECTED"]}
+        "is_active": {"$ne": False}
     }).sort("created_at", -1)
 
     docs = await cursor.to_list(length=100)
 
-    # Group by document type to return the latest valid document for each category
+    # Also search embedded documents from submitted applications if not separately in documents collection
+    if not docs:
+        apps = await db["applications"].find({"user_id": user_id}).to_list(20)
+        for a in apps:
+            for emb in a.get("documents", []):
+                docs.append({
+                    "document_id": emb.get("id"),
+                    "_id": emb.get("id"),
+                    "document_type": emb.get("document_code"),
+                    "file_name": emb.get("file_name") or emb.get("document_name") or "document.pdf",
+                    "file_size_bytes": (emb.get("file_size_kb") or 500) * 1024,
+                    "content_type": "application/pdf",
+                    "status": emb.get("status") or emb.get("verification_status") or "VERIFIED",
+                    "verification_status": emb.get("verification_status") or emb.get("status") or "VERIFIED",
+                    "application_id": a.get("application_id") or a.get("_id"),
+                    "created_at": emb.get("uploaded_at") or a.get("created_at"),
+                    "version": emb.get("version", 1)
+                })
+
+    # MoTA current scholarship cycle required financial year
+    REQUIRED_INCOME_FY = "FY 2025-26"
+
+    # Group by document type to return the latest document and evaluate reusability
     seen_types = set()
     reusable = []
     for d in docs:
@@ -290,6 +336,42 @@ async def get_reusable_documents(
             created_at = d.get("created_at")
             uploaded_date_str = created_at.strftime("%Y-%m-%d") if hasattr(created_at, "strftime") else str(created_at)[:10]
 
+            v_status = d.get("verification_status") or d.get("status") or "VERIFIED"
+            if v_status in ["OCR_VERIFIED", "TYPE_MATCH"]:
+                v_status = "VERIFIED"
+
+            is_reusable = True
+            ineligibility_reason = None
+            req_fy = None
+            doc_fy = None
+
+            # 1. Verification status check
+            if v_status in ["REJECTED", "DEFICIENT", "SUPERSEDED"]:
+                is_reusable = False
+                ineligibility_reason = f"Document status is {v_status}. A verified document is required."
+            elif doc_type == "INCOME_CERTIFICATE":
+                # 2. Check Financial Year requirement for Income Certificate
+                file_name_str = (d.get("file_name") or "").lower()
+                extracted_fy = d.get("extracted_fields", {}).get("financial_year") or d.get("financial_year")
+                if not extracted_fy:
+                    if "2024-25" in file_name_str or "24-25" in file_name_str or "2024" in file_name_str:
+                        extracted_fy = "FY 2024-25"
+                    elif "2025-26" in file_name_str or "25-26" in file_name_str:
+                        extracted_fy = "FY 2025-26"
+                    else:
+                        extracted_fy = "FY 2024-25"
+
+                doc_fy = extracted_fy
+                req_fy = REQUIRED_INCOME_FY
+                if extracted_fy != REQUIRED_INCOME_FY:
+                    is_reusable = False
+                    ineligibility_reason = f"New Income Certificate required for {REQUIRED_INCOME_FY}.\nRequired financial year: {REQUIRED_INCOME_FY}\nExisting document: {extracted_fy}"
+            elif doc_type == "ST_CERTIFICATE":
+                # ST/Caste certificate does not expire annually
+                if v_status in ["VERIFIED", "OCR_VERIFIED", "TYPE_MATCH", "UPLOADED"]:
+                    is_reusable = True
+                    ineligibility_reason = None
+
             reusable.append(ReusableDocumentItem(
                 document_id=doc_id,
                 document_type=doc_type,
@@ -299,7 +381,13 @@ async def get_reusable_documents(
                 uploaded_at=uploaded_date_str,
                 application_id=d.get("application_id", ""),
                 status=d.get("status", "UPLOADED"),
-                download_url=f"/api/documents/{doc_id}/file"
+                download_url=f"/api/documents/{doc_id}/file",
+                version=d.get("version", 1),
+                verification_status=v_status,
+                is_reusable=is_reusable,
+                ineligibility_reason=ineligibility_reason,
+                required_financial_year=req_fy,
+                document_financial_year=doc_fy
             ))
 
     return reusable

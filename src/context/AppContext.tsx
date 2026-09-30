@@ -55,7 +55,8 @@ interface AppContextType {
   fetchApplications: () => Promise<void>;
   addApplication: (app: ApplicationRecord) => Promise<ApplicationRecord>;
   saveDraft: (draftData: any) => Promise<ApplicationRecord>;
-  updateApplicationStatus: (appId: string, newStatus: ApplicationRecord['status'], remarks?: string, officerName?: string) => Promise<void>;
+  updateApplicationStatus: (appId: string, newStatus: ApplicationRecord['status'], remarks?: string, officerName?: string, category?: string, requiredCorrection?: string) => Promise<void>;
+  verifyDocumentStatus: (documentId: string, status: 'VERIFIED' | 'REJECTED', reason?: string) => Promise<void>;
   resolveApplicationDeficiency: (appId: string, updatedDocName: string, file?: File) => Promise<void>;
 
   // Audit Logs
@@ -151,8 +152,15 @@ function toBackendSchemePayload(scheme: SchemeConfig): any {
 }
 
 function transformBackendApplication(app: any): ApplicationRecord {
+  const applicantId = app.applicant_id || app.applicant_snapshot?.applicant_id || '';
+  const snapshot = app.applicant_snapshot || null;
+  const addressLine = app.personal_details?.address_line || snapshot?.address_line || '';
+  const address = app.personal_details?.address || snapshot?.address || addressLine;
+
   return {
     id: app.application_id || app._id,
+    applicantId: applicantId,
+    applicantSnapshot: snapshot,
     schemeId: app.scheme_id,
     schemeCode: app.scheme_id,
     schemeName: app.scheme_name || 'MoTA Scholarship Scheme',
@@ -163,18 +171,21 @@ function transformBackendApplication(app: any): ApplicationRecord {
     status: (app.status || 'SUBMITTED') as ApplicationStatus,
     applicant: {
       id: app.user_id,
-      fullName: app.personal_details?.full_name || '',
-      fatherOrHusbandName: app.personal_details?.father_or_husband_name || '',
-      gender: app.personal_details?.gender || 'OTHER',
-      dob: app.personal_details?.dob || '',
-      aadhaarNumberMasked: app.personal_details?.aadhaar_masked || '',
-      category: (app.personal_details?.category || 'ST') as any,
-      tribeCommunity: app.personal_details?.tribe_community || '',
-      mobile: app.personal_details?.mobile || '',
-      email: app.personal_details?.email || '',
-      state: app.personal_details?.state || '',
-      district: app.personal_details?.district || '',
-      pincode: app.personal_details?.pincode || '',
+      applicantId: applicantId,
+      fullName: app.personal_details?.full_name || snapshot?.name || '',
+      fatherOrHusbandName: app.personal_details?.father_or_husband_name || snapshot?.father_or_husband_name || '',
+      gender: app.personal_details?.gender || snapshot?.gender || 'OTHER',
+      dob: app.personal_details?.dob || snapshot?.dob || '',
+      aadhaarNumberMasked: app.personal_details?.aadhaar_masked || snapshot?.aadhaar_masked || '',
+      category: (app.personal_details?.category || snapshot?.category || 'ST') as any,
+      tribeCommunity: app.personal_details?.tribe_community || snapshot?.tribe_community || '',
+      mobile: app.personal_details?.mobile || snapshot?.phone || '',
+      email: app.personal_details?.email || snapshot?.email || '',
+      state: app.personal_details?.state || snapshot?.state || '',
+      district: app.personal_details?.district || snapshot?.district || '',
+      pincode: app.personal_details?.pincode || snapshot?.pincode || '',
+      address: address,
+      addressLine: addressLine,
       disabilityStatus: 'NONE',
     },
     academic: {
@@ -202,29 +213,48 @@ function transformBackendApplication(app: any): ApplicationRecord {
     documents: (app.documents || []).map((d: any, idx: number) => ({
       id: d.id || `DOC-${idx}`,
       documentCode: d.document_code || 'DOC',
-      documentName: d.document_name || 'Certificate',
-      fileUrl: d.file_url || '#',
+      documentName: d.document_name || d.file_name || 'Certificate',
+      fileUrl: d.file_url || `/api/documents/${d.id || `DOC-${idx}`}/file`,
       fileName: d.file_name || 'Document.pdf',
       fileSizeKB: d.file_size_kb || 450,
       uploadedAt: d.uploaded_at ? new Date(d.uploaded_at).toISOString().substring(0, 10) : new Date().toISOString().substring(0, 10),
       ocrExtracted: true,
-      status: (d.status || 'VALID') as any,
-      deficiencyReason: d.deficiency_notes,
+      status: (d.status || 'PENDING') as any,
+      verificationStatus: d.verification_status || (d.status === 'VERIFIED' ? 'VERIFIED' : d.status === 'REJECTED' ? 'REJECTED' : 'PENDING'),
+      fileExists: d.file_exists !== false,
+      rejectionReason: d.rejection_reason || d.deficiency_notes,
+      deficiencyReason: d.rejection_reason || d.deficiency_notes,
+      verifiedBy: d.verified_by,
+      verifiedAt: d.verified_at,
     })),
     hasDeficiency: app.has_deficiency || app.status === 'DEFICIENT',
-    deficiencyNotes: app.deficiency_notes,
+    deficiencyCategory: app.deficiency_category,
+    deficiencyReason: app.deficiency_reason || app.deficiency_notes,
+    deficiencyRequiredCorrection: app.deficiency_required_correction,
+    deficiencyNotes: app.deficiency_notes || app.deficiency_reason,
     officerRemarks: app.officer_remarks,
-    auditTrail: [
-      {
-        id: 'AUD-01',
-        timestamp: app.created_at ? new Date(app.created_at).toISOString().replace('T', ' ').substring(0, 19) : new Date().toISOString().replace('T', ' ').substring(0, 19),
-        actor: app.personal_details?.full_name || 'Citizen Applicant',
-        actorRole: 'APPLICANT',
-        action: 'Application Submitted on MoTA Portal',
-        newStatus: (app.status || 'SUBMITTED') as ApplicationStatus,
-        remarks: 'Digital application dossier successfully lodged with statutory Aadhaar seeding.'
-      }
-    ]
+    rejectionReason: app.rejection_reason || (app.status === 'REJECTED' ? (app.officer_remarks || 'Application does not satisfy statutory scheme criteria.') : undefined),
+    auditTrail: (app.audit_trail && app.audit_trail.length > 0)
+      ? app.audit_trail.map((entry: any) => ({
+          id: entry.id || entry._id || 'AUD-LOG',
+          timestamp: entry.timestamp ? new Date(entry.timestamp).toISOString().replace('T', ' ').substring(0, 19) : '',
+          actor: entry.actor || 'Official Authority',
+          actorRole: entry.role || 'OFFICER',
+          action: entry.action || 'Application Lifecycle Update',
+          newStatus: (entry.newStatus || entry.new_status || app.status || 'SUBMITTED') as ApplicationStatus,
+          remarks: entry.remarks || entry.reason || 'Lifecycle event recorded.'
+        }))
+      : [
+          {
+            id: 'AUD-01',
+            timestamp: app.created_at ? new Date(app.created_at).toISOString().replace('T', ' ').substring(0, 19) : new Date().toISOString().replace('T', ' ').substring(0, 19),
+            actor: app.personal_details?.full_name || 'Citizen Applicant',
+            actorRole: 'APPLICANT',
+            action: 'Application Submitted on MoTA Portal',
+            newStatus: (app.status || 'SUBMITTED') as ApplicationStatus,
+            remarks: 'Digital application dossier successfully lodged with statutory Aadhaar seeding.'
+          }
+        ]
   };
 }
 
@@ -539,6 +569,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     try {
       const payload = {
         scheme_id: app.schemeCode || app.schemeId,
+        applicant_id: app.applicantId || app.applicant?.applicantId || undefined,
         personal_details: {
           full_name: app.applicant.fullName,
           father_or_husband_name: app.applicant.fatherOrHusbandName,
@@ -552,6 +583,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           state: app.applicant.state,
           district: app.applicant.district,
           pincode: app.applicant.pincode,
+          address: app.applicant.address || app.applicant.addressLine || `${app.applicant.district}, ${app.applicant.state}`,
+          address_line: app.applicant.addressLine || app.applicant.address,
         },
         academic_details: {
           current_course: app.academic.currentCourse,
@@ -705,13 +738,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     appId: string,
     newStatus: ApplicationRecord['status'],
     remarks?: string,
-    officerName?: string
+    officerName?: string,
+    category?: string,
+    requiredCorrection?: string
   ) => {
     try {
       await api.updateApplicationStatusOfficer(appId, {
         status: newStatus,
         remarks,
         officer_name: officerName || currentUser.name,
+        category,
+        required_correction: requiredCorrection,
       });
     } catch (err) {
       console.warn('Backend updateApplicationStatus failed:', err);
@@ -724,6 +761,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             ...app,
             status: newStatus,
             hasDeficiency: newStatus === 'DEFICIENT',
+            deficiencyCategory: newStatus === 'DEFICIENT' ? category : app.deficiencyCategory,
+            deficiencyReason: newStatus === 'DEFICIENT' ? remarks : app.deficiencyReason,
+            deficiencyRequiredCorrection: newStatus === 'DEFICIENT' ? requiredCorrection : app.deficiencyRequiredCorrection,
+            deficiencyNotes: newStatus === 'DEFICIENT' ? remarks : app.deficiencyNotes,
             lastUpdated: new Date().toISOString().substring(0, 10),
             officerRemarks: remarks || app.officerRemarks,
           };
@@ -731,6 +772,40 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         return app;
       })
     );
+    fetchApplications().catch(() => {});
+  };
+
+  const verifyDocumentStatus = async (documentId: string, status: 'VERIFIED' | 'REJECTED', reason?: string) => {
+    try {
+      await api.verifyDocument(documentId, status, reason);
+    } catch (err) {
+      console.warn('Backend verifyDocument failed:', err);
+      throw err;
+    }
+
+    setApplications((prev) =>
+      prev.map((app) => {
+        const hasDoc = app.documents.some((d) => d.id === documentId);
+        if (!hasDoc) return app;
+        return {
+          ...app,
+          documents: app.documents.map((d) => {
+            if (d.id === documentId) {
+              return {
+                ...d,
+                status: status,
+                verificationStatus: status,
+                rejectionReason: status === 'REJECTED' ? reason : undefined,
+                verifiedBy: currentUser.name,
+                verifiedAt: new Date().toISOString(),
+              };
+            }
+            return d;
+          }),
+        };
+      })
+    );
+    fetchApplications().catch(() => {});
   };
 
   const resolveApplicationDeficiency = async (appId: string, updatedDocName: string, file?: File) => {
@@ -777,6 +852,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         return app;
       })
     );
+    fetchApplications().catch(() => {});
 
     // Log resubmission
     const app = applications.find(a => a.id === appId);
@@ -811,15 +887,71 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       next.add(id);
       return next;
     });
+    if (id.startsWith('NOTIF-')) {
+      api.markNotificationRead(id).catch(() => {});
+    }
   };
 
+  // STRICT APPLICANT DATA ISOLATION:
+  // For APPLICANT role, applications is already strictly isolated by backend /api/applications/my
+  const userApplications = authUser
+    ? (authUser.role === 'APPLICANT'
+        ? applications
+        : applications.filter(
+            (a) =>
+              a.applicant.id === authUser.id ||
+              (authUser.email && a.applicant.email.toLowerCase() === authUser.email.toLowerCase()) ||
+              (authUser.name && a.applicant.fullName.toLowerCase() === authUser.name.toLowerCase())
+          ))
+    : [];
+
+  const draftApplications = userApplications.filter((a) => a.status === 'DRAFT');
+  const activeDraft = draftApplications[0];
+
+  // Active submitted application (prioritizes submitted/under verification/scrutiny/selection/approved/deficient over draft)
+  const currentApplicantApplication = userApplications.find((a) => a.status !== 'DRAFT') || userApplications[0];
+
   const adminNotifications: AdminNotification[] = React.useMemo(() => {
+    if (currentUser.role === 'APPLICANT') {
+      const notifs: AdminNotification[] = [];
+
+      userApplications.forEach((app) => {
+        const notifId = `NOTIF-${app.id}-${app.status}`;
+        let msg = `Your application ${app.id} for ${app.schemeName} has been ${app.status.toLowerCase().replace(/_/g, ' ')}.`;
+        if (app.status === 'APPROVED') {
+          msg = `Your application ${app.id} for ${app.schemeName} has been approved.`;
+        } else if (app.status === 'REJECTED') {
+          msg = `Your application ${app.id} for ${app.schemeName} has been rejected.`;
+        } else if (app.status === 'DEFICIENT') {
+          msg = `Your application ${app.id} for ${app.schemeName} requires certificate rectification.`;
+        } else if (app.status === 'RESUBMITTED') {
+          msg = `Your application ${app.id} for ${app.schemeName} has been resubmitted and is under review.`;
+        }
+
+        notifs.push({
+          id: notifId,
+          title: `Application ${app.id}: ${app.status.replace(/_/g, ' ')}`,
+          description: msg,
+          schemeCode: app.schemeCode,
+          applicationId: app.id,
+          timestamp: app.lastUpdated || app.submissionDate,
+          isRead: readNotificationIds.has(notifId),
+          actionType: app.status
+        });
+      });
+
+      return notifs;
+    }
+
     return auditLogs
-      .filter(log => ['Application Started', 'New Application Submitted', 'Application Submitted', 'Application Resubmitted'].includes(log.action))
+      .filter(log => ['Application Started', 'New Application Submitted', 'Application Submitted', 'Application Resubmitted', 'APPLICATION_APPROVED', 'APPLICATION_REJECTED', 'DEFICIENCY_ISSUED'].includes(log.action))
       .map(log => ({
         id: log.id,
         title: log.action === 'Application Started' ? 'New application started' :
           log.action === 'Application Resubmitted' ? 'Application resubmitted' :
+            log.action === 'APPLICATION_APPROVED' ? 'Application approved' :
+            log.action === 'APPLICATION_REJECTED' ? 'Application rejected' :
+            log.action === 'DEFICIENCY_ISSUED' ? 'Deficiency issued' :
             'Application submitted for review',
         description: `By ${log.actor}`,
         schemeCode: log.schemeCode,
@@ -828,7 +960,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         isRead: readNotificationIds.has(log.id),
         actionType: log.action
       }));
-  }, [auditLogs, readNotificationIds]);
+  }, [currentUser.role, userApplications, auditLogs, readNotificationIds]);
+
 
   const addGrievance = async (g: Omit<GrievanceRecord, 'id' | 'submittedDate'>) => {
     try {
@@ -865,23 +998,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     );
   };
 
-  // STRICT APPLICANT DATA ISOLATION:
-  // Only find applications that explicitly belong to the authenticated user.
-  const userApplications = authUser
-    ? applications.filter(
-        (a) =>
-          a.applicant.id === authUser.id ||
-          (authUser.email && a.applicant.email.toLowerCase() === authUser.email.toLowerCase()) ||
-          (authUser.name && a.applicant.fullName.toLowerCase() === authUser.name.toLowerCase())
-      )
-    : [];
-
-  const draftApplications = userApplications.filter((a) => a.status === 'DRAFT');
-  const activeDraft = draftApplications[0];
-
-  // Active submitted application (excluding DRAFT, or fallback to first)
-  const currentApplicantApplication = userApplications.find((a) => a.status !== 'DRAFT') || userApplications[0];
-
   return (
     <AppContext.Provider
       value={{
@@ -909,6 +1025,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         addApplication,
         saveDraft,
         updateApplicationStatus,
+        verifyDocumentStatus,
         resolveApplicationDeficiency,
         auditLogs,
         addAuditLog,

@@ -31,7 +31,9 @@ class Settings:
     
     @property
     def cors_origins(self) -> List[str]:
-        return [origin.strip() for origin in self.CORS_ORIGINS_RAW.split(",") if origin.strip()]
+        configured = [origin.strip() for origin in self.CORS_ORIGINS_RAW.split(",") if origin.strip()]
+        defaults = ["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:5174", "http://127.0.0.1:5174", "http://localhost:3000", "http://127.0.0.1:3000", "http://[::1]:5173"]
+        return list(dict.fromkeys(configured + defaults))
 
     def validate_config(self) -> None:
         """

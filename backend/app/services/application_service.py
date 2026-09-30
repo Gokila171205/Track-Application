@@ -71,18 +71,78 @@ DEMO_APPLICATIONS = [
     _demo_application("MOTA/2026-27/DBT/10008", "dbt-fellowship-st", "DBT Fellowship", "SUBMITTED", "Hema Lakra", "hema.lakra@example.com", "Jharkhand"),
 ]
 
-def generate_application_id(scheme_code: str) -> str:
+async def get_or_create_applicant_id(db: AsyncIOMotorDatabase, user_id: str, preferred_id: Optional[str] = None) -> str:
     """
-    Generate an authentic MoTA Government Application ID.
-    Format: MOTA/{FinancialYear}/{SchemeAbbrev}/{RandomSeq}
-    Example: MOTA/2025-26/NF/10492
+    Ensure one permanent, unique Applicant ID per registered applicant citizen.
+    Format: ST-YYYY-XXXXXX (e.g. ST-2026-000123).
+    Once created, this ID is PERMANENT and NEVER regenerated across applications.
+    """
+    # 1. Check existing applicant profile
+    profile = await db["applicant_profiles"].find_one({"user_id": user_id})
+    if profile and profile.get("applicant_id"):
+        return profile["applicant_id"]
+
+    # 2. Check user record
+    user = await db["users"].find_one({"_id": user_id})
+    if user and user.get("applicant_id"):
+        return user["applicant_id"]
+
+    now = datetime.now(timezone.utc)
+    # 3. If a specific valid preferred ID is passed (e.g. for testing ST-2026-000123), verify uniqueness
+    if preferred_id and preferred_id.startswith("ST-"):
+        taken = await db["applicant_profiles"].find_one({"applicant_id": preferred_id})
+        if not taken:
+            applicant_id = preferred_id
+        else:
+            counter = await db["counters"].find_one_and_update(
+                {"_id": f"applicant_{now.year}"},
+                {"$inc": {"seq": 1}},
+                upsert=True,
+                return_document=True
+            )
+            applicant_id = f"ST-{now.year}-{counter['seq']:06d}"
+    else:
+        counter = await db["counters"].find_one_and_update(
+            {"_id": f"applicant_{now.year}"},
+            {"$inc": {"seq": 1}},
+            upsert=True,
+            return_document=True
+        )
+        applicant_id = f"ST-{now.year}-{counter['seq']:06d}"
+
+    # Persist permanent applicant_id into users and applicant_profiles
+    if user:
+        await db["users"].update_one({"_id": user_id}, {"$set": {"applicant_id": applicant_id}})
+    if profile:
+        await db["applicant_profiles"].update_one({"user_id": user_id}, {"$set": {"applicant_id": applicant_id}})
+
+    return applicant_id
+
+
+async def generate_application_id_async(db: AsyncIOMotorDatabase, scheme_code: Optional[str] = None) -> str:
+    """
+    Generate an authentic sequential MoTA Application ID.
+    Format: APP-YYYY-XXXXXX (e.g. APP-2026-000001).
+    Every application gets a unique Application ID.
     """
     now = datetime.now(timezone.utc)
-    fy = f"{now.year}-{str(now.year + 1)[-2:]}"
-    parts = scheme_code.split("-")
-    abbrev = parts[1] if len(parts) > 1 else "ST"
-    seq = random.randint(10000, 99999)
-    return f"MOTA/{fy}/{abbrev}/{seq}"
+    counter = await db["counters"].find_one_and_update(
+        {"_id": f"application_{now.year}"},
+        {"$inc": {"seq": 1}},
+        upsert=True,
+        return_document=True
+    )
+    return f"APP-{now.year}-{counter['seq']:06d}"
+
+
+def generate_application_id(scheme_code: str) -> str:
+    """
+    Synchronous fallback for generating authentic Application ID.
+    Format: APP-YYYY-XXXXXX (e.g. APP-2026-000001).
+    """
+    now = datetime.now(timezone.utc)
+    seq = random.randint(1, 999999)
+    return f"APP-{now.year}-{seq:06d}"
 
 async def seed_schemes_if_empty(db: AsyncIOMotorDatabase) -> None:
     """

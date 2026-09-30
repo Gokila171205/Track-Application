@@ -3,6 +3,7 @@ from datetime import datetime
 from pydantic import BaseModel, Field
 
 class ApplicantProfileCreate(BaseModel):
+    applicant_id: Optional[str] = Field(default=None, description="Permanent unique Applicant ID e.g. ST-2026-000123")
     full_name: str = Field(..., min_length=2, max_length=120)
     father_or_husband_name: Optional[str] = Field(default=None, max_length=120)
     gender: str = Field(default="FEMALE")
@@ -31,6 +32,7 @@ class ApplicantProfileUpdate(BaseModel):
 
 class ApplicantProfileResponse(BaseModel):
     user_id: str
+    applicant_id: str = Field(..., description="Permanent unique Applicant ID e.g. ST-2026-000123")
     full_name: str
     father_or_husband_name: Optional[str] = None
     gender: str
@@ -60,3 +62,9 @@ class ReusableDocumentItem(BaseModel):
     application_id: str
     status: str
     download_url: str
+    version: Optional[int] = 1
+    verification_status: Optional[str] = "VERIFIED"
+    is_reusable: bool = True
+    ineligibility_reason: Optional[str] = None
+    required_financial_year: Optional[str] = None
+    document_financial_year: Optional[str] = None

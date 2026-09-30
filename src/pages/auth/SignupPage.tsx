@@ -2,6 +2,15 @@ import React, { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
 import { Eye, EyeOff, Lock, Mail, User, Phone, AlertCircle, ShieldCheck } from 'lucide-react';
+import { ExplainableErrorCard } from '../../components/common/ExplainableErrorCard';
+import { ValidationSummaryBanner } from '../../components/common/ValidationSummaryBanner';
+import { ExplainableIssue } from '../../types/explainableValidation';
+import {
+  validatePhoneExplainable,
+  validateEmailExplainable,
+  validateFieldExplainable
+} from '../../utils/explainableValidators';
+import { api } from '../../services/api';
 
 export const SignupPage: React.FC = () => {
   const { register } = useAuth();
@@ -20,28 +29,165 @@ export const SignupPage: React.FC = () => {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
+  // Field-level explainable validation state (Parts 11, 12, 13, 14, 16)
+  const [fieldIssues, setFieldIssues] = useState<Record<string, ExplainableIssue | null>>({});
+  const [phoneAvailabilityStatus, setPhoneAvailabilityStatus] = useState<
+    'idle' | 'checking' | 'available' | 'duplicate'
+  >('idle');
+
+  const validatePhone = async (val: string, checkRemote: boolean = false) => {
+    const trimmed = (val || '').trim();
+    if (!trimmed) {
+      setPhoneAvailabilityStatus('idle');
+      const issue = validatePhoneExplainable(val);
+      setFieldIssues((prev) => ({ ...prev, phone: issue }));
+      return issue;
+    }
+
+    // 1. Format validation FIRST (no letters, spaces, length must be exactly 10)
+    const fmtIssue = validatePhoneExplainable(val);
+    if (fmtIssue) {
+      setPhoneAvailabilityStatus('idle');
+      setFieldIssues((prev) => ({ ...prev, phone: fmtIssue }));
+      return fmtIssue;
+    }
+
+    // 2. Only if format strictly passes ^[0-9]{10}$, check remote database
+    if (checkRemote) {
+      setPhoneAvailabilityStatus('checking');
+      try {
+        const res = await api.checkAvailability(undefined, trimmed);
+        if (!res.available && res.issue) {
+          setPhoneAvailabilityStatus('duplicate');
+          setFieldIssues((prev) => ({ ...prev, phone: res.issue || null }));
+          return res.issue;
+        } else {
+          setPhoneAvailabilityStatus('available');
+          setFieldIssues((prev) => ({ ...prev, phone: null }));
+          return null;
+        }
+      } catch (_) {
+        setPhoneAvailabilityStatus('idle');
+      }
+    } else {
+      setPhoneAvailabilityStatus('idle');
+      setFieldIssues((prev) => ({ ...prev, phone: null }));
+    }
+
+    return null;
+  };
+
+  const validateEmail = async (val: string, checkRemote: boolean = false) => {
+    const issue = validateEmailExplainable(val);
+    if (issue) {
+      setFieldIssues((prev) => ({ ...prev, email: issue }));
+      return issue;
+    }
+    if (checkRemote && val.includes('@') && val.includes('.')) {
+      try {
+        const res = await api.checkAvailability(val.trim().toLowerCase(), undefined);
+        if (!res.available && res.issue) {
+          setFieldIssues((prev) => ({ ...prev, email: res.issue || null }));
+          return res.issue;
+        }
+      } catch (_) {}
+    }
+    setFieldIssues((prev) => ({ ...prev, email: null }));
+    return null;
+  };
+
+  const handlePhoneChange = (val: string) => {
+    setPhone(val);
+    const trimmed = val.trim();
+    if (trimmed.length === 0) {
+      setPhoneAvailabilityStatus('idle');
+      setFieldIssues((prev) => ({ ...prev, phone: null }));
+    } else if (trimmed.length === 10 && /^\d+$/.test(trimmed)) {
+      // Exactly 10 digits entered: validate and check availability
+      validatePhone(val, true);
+    } else {
+      // Format incomplete or invalid: validate format locally, NEVER query duplicate
+      setPhoneAvailabilityStatus('idle');
+      validatePhone(val, false);
+    }
+  };
+
+  const handleEmailChange = (val: string) => {
+    setEmail(val);
+    if (val.trim().length > 0) {
+      validateEmail(val, false);
+    } else {
+      setFieldIssues((prev) => ({ ...prev, email: null }));
+    }
+  };
+
   const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     setErrorMessage(null);
 
-    // Form validations
-    if (!name.trim() || !email.trim() || !phone.trim() || !password || !confirmPassword) {
-      setErrorMessage('Please fill in all mandatory fields.');
-      return;
+    const issues: Record<string, ExplainableIssue | null> = {};
+
+    // 1. Name check
+    const nameIssue = validateFieldExplainable('name', 'Full Name', name, 1, 'Please enter your full name as per official records.');
+    if (nameIssue) issues.name = nameIssue;
+
+    // 2. Email check
+    const emailIssue = await validateEmail(email, true);
+    if (emailIssue) issues.email = emailIssue;
+
+    // 3. Phone check
+    const phoneIssue = await validatePhone(phone, true);
+    if (phoneIssue) issues.phone = phoneIssue;
+
+    // 4. Password check
+    if (!password) {
+      issues.password = {
+        status: 'ERROR',
+        category: 'FIELD_REQUIRED',
+        field_id: 'password',
+        what_is_wrong: 'Password Required',
+        why_is_wrong: 'A secure password is required to protect your citizen application data.',
+        expected: 'Password with at least 6 characters',
+        provided: 'Empty',
+        action: 'Please enter a password with at least 6 characters.',
+        summary: 'Password is required.'
+      };
+    } else if (password.length < 6) {
+      issues.password = {
+        status: 'ERROR',
+        category: 'PASSWORD_LENGTH',
+        field_id: 'password',
+        what_is_wrong: 'Password Too Short',
+        why_is_wrong: `Your password contains only ${password.length} characters. Minimum required is 6 characters.`,
+        expected: 'Minimum 6 characters',
+        provided: `${password.length} characters`,
+        action: 'Please enter a password with at least 6 characters.',
+        summary: 'Password must be at least 6 characters.'
+      };
     }
 
-    if (password.length < 6) {
-      setErrorMessage('Password must be at least 6 characters long.');
-      return;
-    }
-
-    if (password !== confirmPassword) {
-      setErrorMessage('Password and Confirm Password do not match.');
-      return;
+    if (password && confirmPassword && password !== confirmPassword) {
+      issues.confirmPassword = {
+        status: 'ERROR',
+        category: 'PASSWORD_MISMATCH',
+        field_id: 'confirmPassword',
+        what_is_wrong: 'Passwords Do Not Match',
+        why_is_wrong: 'The password and confirm password fields do not match.',
+        expected: 'Matching passwords',
+        provided: 'Mismatching confirmation',
+        action: 'Please ensure both password fields match exactly.',
+        summary: 'Password confirmation does not match.'
+      };
     }
 
     if (!termsAccepted) {
       setErrorMessage('You must review and accept the statutory terms and Aadhaar verification consent.');
+    }
+
+    setFieldIssues(issues);
+
+    const activeIssueList = Object.values(issues).filter(Boolean) as ExplainableIssue[];
+    if (activeIssueList.length > 0 || !termsAccepted) {
       return;
     }
 
@@ -53,8 +199,47 @@ export const SignupPage: React.FC = () => {
         phone: phone.trim(),
         password,
       });
-      navigate('/applicant/dashboard');
+      navigate('/schemes');
     } catch (err: any) {
+      const detail = err.detail;
+      if (detail && typeof detail === 'object') {
+        if (detail.code === 'PHONE_DUPLICATE' || detail.field === 'phone') {
+          setPhoneAvailabilityStatus('duplicate');
+          setFieldIssues((prev) => ({
+            ...prev,
+            phone: validatePhoneExplainable(phone, true),
+          }));
+          setErrorMessage(detail.message || 'This phone number is already registered.');
+          return;
+        }
+        if (detail.code === 'PHONE_INVALID_LENGTH' || detail.code === 'PHONE_INVALID_FORMAT' || detail.code === 'PHONE_REQUIRED') {
+          setPhoneAvailabilityStatus('idle');
+          setFieldIssues((prev) => ({
+            ...prev,
+            phone: validatePhoneExplainable(phone),
+          }));
+          setErrorMessage(detail.message || 'Please enter a valid 10-digit mobile number.');
+          return;
+        }
+        if (detail.code === 'EMAIL_DUPLICATE' || detail.field === 'email') {
+          setFieldIssues((prev) => ({
+            ...prev,
+            email: validateEmailExplainable(email, true),
+          }));
+          setErrorMessage(detail.message || 'An account with this email already exists.');
+          return;
+        }
+        if (detail.code === 'BOTH_DUPLICATE') {
+          setPhoneAvailabilityStatus('duplicate');
+          setFieldIssues((prev) => ({
+            ...prev,
+            email: validateEmailExplainable(email, true),
+            phone: validatePhoneExplainable(phone, true),
+          }));
+          setErrorMessage(detail.message || 'Both email and phone number are already registered.');
+          return;
+        }
+      }
       setErrorMessage(err.message || 'Registration failed. Please try again.');
     } finally {
       setIsSubmitting(false);
@@ -107,6 +292,20 @@ export const SignupPage: React.FC = () => {
             </div>
           )}
 
+          {/* Summary Banner for Multiple Mistakes (Part 16) */}
+          {Object.values(fieldIssues).filter(Boolean).length > 0 && (
+            <ValidationSummaryBanner
+              issues={Object.values(fieldIssues).filter(Boolean) as ExplainableIssue[]}
+              onSelectIssue={(iss) => {
+                const el = document.getElementById(`signup-${iss.field_id}`);
+                if (el) {
+                  el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                  el.focus();
+                }
+              }}
+            />
+          )}
+
           <form onSubmit={handleSubmit} noValidate className="space-y-4">
             {/* Full Name */}
             <div>
@@ -122,12 +321,31 @@ export const SignupPage: React.FC = () => {
                   type="text"
                   required
                   value={name}
-                  onChange={(e) => setName(e.target.value)}
+                  onChange={(e) => {
+                    setName(e.target.value);
+                    if (e.target.value.trim()) {
+                      setFieldIssues((prev) => ({ ...prev, name: null }));
+                    }
+                  }}
+                  onBlur={() => {
+                    const iss = validateFieldExplainable('name', 'Full Name', name, 1, 'Please enter your full name as per official records.');
+                    setFieldIssues((prev) => ({ ...prev, name: iss }));
+                  }}
                   placeholder="e.g. Birsa Munda"
-                  className="w-full pl-9 pr-3 py-2.5 text-xs bg-slate-50 border border-slate-300 rounded focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-800 text-slate-900"
+                  className={`w-full pl-9 pr-3 py-2.5 text-xs bg-slate-50 border rounded focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-800 text-slate-900 ${
+                    fieldIssues.name ? 'border-red-400 bg-red-50/30' : 'border-slate-300'
+                  }`}
                 />
                 <User className="w-4 h-4 text-slate-400 absolute left-3 top-3" />
               </div>
+              {fieldIssues.name && (
+                <div className="mt-2">
+                  <ExplainableErrorCard
+                    issue={fieldIssues.name}
+                    onActionClick={() => document.getElementById('signup-name')?.focus()}
+                  />
+                </div>
+              )}
             </div>
 
             {/* Email Address */}
@@ -145,12 +363,23 @@ export const SignupPage: React.FC = () => {
                   required
                   autoComplete="email"
                   value={email}
-                  onChange={(e) => setEmail(e.target.value)}
+                  onChange={(e) => handleEmailChange(e.target.value)}
+                  onBlur={() => validateEmail(email, true)}
                   placeholder="e.g. birsa@tribal.gov.in"
-                  className="w-full pl-9 pr-3 py-2.5 text-xs bg-slate-50 border border-slate-300 rounded focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-800 text-slate-900"
+                  className={`w-full pl-9 pr-3 py-2.5 text-xs bg-slate-50 border rounded focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-800 text-slate-900 ${
+                    fieldIssues.email ? 'border-red-400 bg-red-50/30' : 'border-slate-300'
+                  }`}
                 />
                 <Mail className="w-4 h-4 text-slate-400 absolute left-3 top-3" />
               </div>
+              {fieldIssues.email && (
+                <div className="mt-2">
+                  <ExplainableErrorCard
+                    issue={fieldIssues.email}
+                    onActionClick={() => document.getElementById('signup-email')?.focus()}
+                  />
+                </div>
+              )}
             </div>
 
             {/* Mobile Number */}
@@ -168,12 +397,35 @@ export const SignupPage: React.FC = () => {
                   required
                   maxLength={15}
                   value={phone}
-                  onChange={(e) => setPhone(e.target.value)}
+                  onChange={(e) => handlePhoneChange(e.target.value)}
+                  onBlur={() => validatePhone(phone, true)}
                   placeholder="e.g. 9876543210"
-                  className="w-full pl-9 pr-3 py-2.5 text-xs bg-slate-50 border border-slate-300 rounded focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-800 text-slate-900 font-mono"
+                  className={`w-full pl-9 pr-3 py-2.5 text-xs bg-slate-50 border rounded focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-800 text-slate-900 font-mono ${
+                    fieldIssues.phone ? 'border-red-400 bg-red-50/30' : 'border-slate-300'
+                  }`}
                 />
                 <Phone className="w-4 h-4 text-slate-400 absolute left-3 top-3" />
               </div>
+              {phoneAvailabilityStatus === 'checking' && (
+                <div className="mt-1.5 text-[11px] text-blue-700 flex items-center gap-1.5 font-medium">
+                  <span className="inline-block animate-spin">⏳</span>
+                  <span>Checking phone number...</span>
+                </div>
+              )}
+              {phoneAvailabilityStatus === 'available' && !fieldIssues.phone && (
+                <div className="mt-1.5 text-[11px] text-emerald-700 flex items-center gap-1.5 font-semibold">
+                  <span className="text-emerald-600 font-bold">✓</span>
+                  <span>Phone number available</span>
+                </div>
+              )}
+              {fieldIssues.phone && (
+                <div className="mt-2">
+                  <ExplainableErrorCard
+                    issue={fieldIssues.phone}
+                    onActionClick={() => document.getElementById('signup-phone')?.focus()}
+                  />
+                </div>
+              )}
             </div>
 
             {/* Applicant Category */}
@@ -211,9 +463,16 @@ export const SignupPage: React.FC = () => {
                     type={showPassword ? 'text' : 'password'}
                     required
                     value={password}
-                    onChange={(e) => setPassword(e.target.value)}
+                    onChange={(e) => {
+                      setPassword(e.target.value);
+                      if (e.target.value.length >= 6) {
+                        setFieldIssues((prev) => ({ ...prev, password: null }));
+                      }
+                    }}
                     placeholder="Min. 6 chars"
-                    className="w-full pl-8 pr-8 py-2.5 text-xs bg-slate-50 border border-slate-300 rounded focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-800 text-slate-900"
+                    className={`w-full pl-8 pr-8 py-2.5 text-xs bg-slate-50 border rounded focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-800 text-slate-900 ${
+                      fieldIssues.password ? 'border-red-400 bg-red-50/30' : 'border-slate-300'
+                    }`}
                   />
                   <Lock className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-3" />
                   <button
@@ -225,24 +484,39 @@ export const SignupPage: React.FC = () => {
                     {showPassword ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
                   </button>
                 </div>
+                {fieldIssues.password && (
+                  <div className="mt-2">
+                    <ExplainableErrorCard
+                      issue={fieldIssues.password}
+                      onActionClick={() => document.getElementById('signup-password')?.focus()}
+                    />
+                  </div>
+                )}
               </div>
 
               <div>
                 <label
-                  htmlFor="signup-confirm-password"
+                  htmlFor="signup-confirmPassword"
                   className="block text-xs font-bold text-slate-700 mb-1"
                 >
                   Confirm Password <span className="text-rose-600">*</span>
                 </label>
                 <div className="relative">
                   <input
-                    id="signup-confirm-password"
+                    id="signup-confirmPassword"
                     type={showConfirmPassword ? 'text' : 'password'}
                     required
                     value={confirmPassword}
-                    onChange={(e) => setConfirmPassword(e.target.value)}
+                    onChange={(e) => {
+                      setConfirmPassword(e.target.value);
+                      if (e.target.value === password) {
+                        setFieldIssues((prev) => ({ ...prev, confirmPassword: null }));
+                      }
+                    }}
                     placeholder="Re-enter password"
-                    className="w-full pl-8 pr-8 py-2.5 text-xs bg-slate-50 border border-slate-300 rounded focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-800 text-slate-900"
+                    className={`w-full pl-8 pr-8 py-2.5 text-xs bg-slate-50 border rounded focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-800 text-slate-900 ${
+                      fieldIssues.confirmPassword ? 'border-red-400 bg-red-50/30' : 'border-slate-300'
+                    }`}
                   />
                   <Lock className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-3" />
                   <button
@@ -254,6 +528,14 @@ export const SignupPage: React.FC = () => {
                     {showConfirmPassword ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
                   </button>
                 </div>
+                {fieldIssues.confirmPassword && (
+                  <div className="mt-2">
+                    <ExplainableErrorCard
+                      issue={fieldIssues.confirmPassword}
+                      onActionClick={() => document.getElementById('signup-confirmPassword')?.focus()}
+                    />
+                  </div>
+                )}
               </div>
             </div>
 

@@ -1,6 +1,7 @@
 import React from 'react';
 import { Outlet, NavLink, Link, useLocation } from 'react-router-dom';
 import { useApp } from '../context/AppContext';
+import { handleSkipToMainContent } from '../utils/skipLink';
 
 import {
   LayoutDashboard,
@@ -36,6 +37,20 @@ export const AdminLayout: React.FC = () => {
 
   return (
     <div className="flex flex-col min-h-screen bg-[#f1f5f9]">
+
+      {/* Skip to Main Content Link for Keyboard Users */}
+      <a
+        href="#main-content"
+        onClick={handleSkipToMainContent}
+        onKeyDown={(e) => {
+          if (e.key === ' ' || e.key === 'Enter') {
+            handleSkipToMainContent(e);
+          }
+        }}
+        className="sr-only focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:z-50 focus:px-3 focus:py-1.5 focus:bg-amber-400 focus:text-blue-950 focus:font-bold focus:text-xs focus:rounded focus:shadow-lg focus:outline-none focus:ring-2 focus:ring-blue-900"
+      >
+        Skip to Main Content
+      </a>
 
       {/* Officer Top Bar */}
       <header className="bg-[#0b2853] text-white border-b-2 border-amber-500 sticky top-0 z-40 shadow">
@@ -114,7 +129,11 @@ export const AdminLayout: React.FC = () => {
         </aside>
 
         {/* Content View */}
-        <main className="flex-1 p-4 sm:p-6 overflow-y-auto">
+        <main
+          id="main-content"
+          tabIndex={-1}
+          className="flex-1 p-4 sm:p-6 overflow-y-auto scroll-mt-20 focus:outline-none"
+        >
           <Outlet />
         </main>
       </div>

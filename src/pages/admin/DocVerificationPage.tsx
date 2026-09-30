@@ -99,6 +99,7 @@ export const DocVerificationPage: React.FC = () => {
         applicantName="Rahul Kumar Gond"
         declaredIncome={180000}
         isDeficientScenario={selectedScenario === 'DEFICIENT' && selectedDocType === 'INCOME_CERTIFICATE'}
+        isOfficerMode={true}
       />
 
       {/* Explainable Decision */}

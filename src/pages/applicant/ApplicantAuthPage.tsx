@@ -16,7 +16,7 @@ export const ApplicantAuthPage: React.FC = () => {
   const handleLogin = (e: React.FormEvent) => {
     e.preventDefault();
     switchRole('APPLICANT');
-    navigate('/applicant/dashboard');
+    navigate('/schemes');
   };
 
   return (

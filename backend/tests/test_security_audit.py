@@ -172,7 +172,38 @@ def test_full_security_and_authorization_audit():
         # -------------------------------------------------------------
         print("\n[TEST 6] Testing Document Security & Ownership Enforcement...")
         # Applicant A uploads document to Application A
-        fake_file = io.BytesIO(b"%PDF-1.4 Fake Caste Certificate for test")
+        cert_text = (
+            "GOVERNMENT OF JHARKHAND\n"
+            "SCHEDULED TRIBE COMMUNITY CERTIFICATE\n"
+            "Certificate No: ST/2026/001\n"
+            "This is to certify that Sunita Soren belongs to the Santhal Community "
+            "recognized as Scheduled Tribe under Constitution Order 1950."
+        )
+        import pypdf
+        writer = pypdf.PdfWriter()
+        writer.add_blank_page(width=612, height=792)
+        writer.add_metadata({"/Producer": "Government of India", "/Title": "Certificate", "/Subject": cert_text})
+        page = writer.pages[0]
+        stream_ops = "BT /F1 12 Tf 50 720 Td 14 TL "
+        for line in cert_text.split("\n"):
+            stream_ops += f"({line}) ' "
+        stream_ops += "ET"
+        cs = pypdf.generic.DecodedStreamObject()
+        cs.set_data(stream_ops.encode("latin-1", errors="replace"))
+        page[pypdf.generic.NameObject("/Contents")] = cs
+        font_dict = pypdf.generic.DictionaryObject({
+            pypdf.generic.NameObject("/Type"): pypdf.generic.NameObject("/Font"),
+            pypdf.generic.NameObject("/Subtype"): pypdf.generic.NameObject("/Type1"),
+            pypdf.generic.NameObject("/BaseFont"): pypdf.generic.NameObject("/Helvetica"),
+        })
+        page[pypdf.generic.NameObject("/Resources")] = pypdf.generic.DictionaryObject({
+            pypdf.generic.NameObject("/Font"): pypdf.generic.DictionaryObject({pypdf.generic.NameObject("/F1"): font_dict})
+        })
+        pdf_out = io.BytesIO()
+        writer.write(pdf_out)
+        pdf_bytes = pdf_out.getvalue()
+
+        fake_file = io.BytesIO(pdf_bytes)
         res_upload_a = client.post(
             "/api/documents/upload",
             data={"application_id": app_a_id, "document_type": "ST_CERTIFICATE"},

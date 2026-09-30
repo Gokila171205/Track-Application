@@ -148,28 +148,42 @@ def normalize_phone(raw_phone: str) -> str:
 
 def validate_phone(raw_phone: str) -> str:
     """
-    Validate Indian mobile number:
-    - Must be exactly 10 digits
-    - Must start with valid Indian mobile prefixes (6, 7, 8, or 9)
+    Validate Indian mobile number with structured explainable codes:
+    - Empty -> PHONE_REQUIRED
+    - Non-digits -> PHONE_INVALID_FORMAT
+    - Length != 10 -> PHONE_INVALID_LENGTH
     """
-    cleaned = normalize_phone(raw_phone)
-    if not cleaned.isdigit() or len(cleaned) != 10:
+    val = str(raw_phone or "").strip()
+    if not val:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid phone number: Must be a valid 10-digit Indian mobile number."
+            detail={
+                "field": "phone",
+                "code": "PHONE_REQUIRED",
+                "message": "Phone number is required."
+            }
         )
 
-    if cleaned[0] not in ("6", "7", "8", "9"):
+    # Check for non-digit characters (letters, spaces, special chars, dashes)
+    if not val.isdigit():
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid mobile number: Indian mobile numbers must start with 6, 7, 8, or 9."
+            detail={
+                "field": "phone",
+                "code": "PHONE_INVALID_FORMAT",
+                "message": "The mobile number can contain digits only."
+            }
         )
 
-    # Check for trivial repeating digits like 0000000000
-    if len(set(cleaned)) == 1:
+    # Check exact 10 digits
+    if len(val) != 10:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid mobile number: Repeating identical digits rejected."
+            detail={
+                "field": "phone",
+                "code": "PHONE_INVALID_LENGTH",
+                "message": f"Phone number must contain exactly 10 digits. Provided: {len(val)} digits."
+            }
         )
 
-    return cleaned
+    return val

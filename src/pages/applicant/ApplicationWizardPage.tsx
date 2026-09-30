@@ -10,6 +10,18 @@ import { ExplainableEvidenceCard } from '../../components/document-ai/Explainabl
 import { simulateDocumentOcr } from '../../services/documentAiMock';
 import { evaluateApplicantEligibility } from '../../services/eligibilityEngine';
 import { DigiLockerService, PfmsDbtService, ESignService } from '../../services/integrations';
+import { ExplainableErrorCard } from '../../components/common/ExplainableErrorCard';
+import { ValidationSummaryBanner } from '../../components/common/ValidationSummaryBanner';
+import { ExplainableIssue } from '../../types/explainableValidation';
+import {
+  validatePhoneExplainable,
+  validateEmailExplainable,
+  validateFieldExplainable,
+  validateFileClientExplainable,
+  inspectDocumentClientFallback,
+  getSchemeRequiredDocuments,
+  getDocumentDisplayName
+} from '../../utils/explainableValidators';
 import {
   User,
   ShieldCheck,
@@ -107,83 +119,154 @@ export const ApplicationWizardPage: React.FC = () => {
   const [admissionFileObj, setAdmissionFileObj] = useState<File | null>(null);
   const [isDigiLockerLinked, setIsDigiLockerLinked] = useState<boolean>(false);
 
-  // Real OCR & Document Verification State per slot
-  const [ocrStates, setOcrStates] = useState<Record<'ST' | 'INC' | 'MARK' | 'ADM', {
+  // Dynamic Scheme Document Requirements (Part 22)
+  const schemeRequiredDocs = React.useMemo(() => {
+    return getSchemeRequiredDocuments(selectedScheme);
+  }, [selectedScheme]);
+
+  // Explainable Form Field Issues (Parts 11, 12, 13, 14)
+  const [formFieldIssues, setFormFieldIssues] = useState<Record<string, ExplainableIssue | null>>({});
+
+  // Document Slot State per document code (Parts 1-10, 15, 17, 18, 19, 20)
+  interface DocSlotState {
+    file: File | null;
+    fileName: string;
     status: 'IDLE' | 'READING' | 'CHECKING' | 'TYPE_MATCH' | 'TYPE_MISMATCH' | 'LOW_QUALITY' | 'MANUAL_REVIEW' | 'ERROR';
     detectedType?: string | null;
     requiredType?: string;
     extractedSnippet?: string;
     extractedFields?: Record<string, any>;
     message?: string;
-    fileName?: string;
-  }>>({
-    ST: { status: 'IDLE', requiredType: 'ST_CERTIFICATE' },
-    INC: { status: 'IDLE', requiredType: 'INCOME_CERTIFICATE' },
-    MARK: { status: 'IDLE', requiredType: 'MARKSHEET' },
-    ADM: { status: 'IDLE', requiredType: 'ADMISSION_PROOF' },
-  });
+    explainableIssue?: ExplainableIssue | null;
+  }
 
-  const docTypeMapping: Record<'ST' | 'INC' | 'MARK' | 'ADM', string> = {
-    ST: 'ST_CERTIFICATE',
-    INC: 'INCOME_CERTIFICATE',
-    MARK: 'MARKSHEET',
-    ADM: 'ADMISSION_PROOF',
+  const [docSlots, setDocSlots] = useState<Record<string, DocSlotState>>({});
+
+  // Real-time Field Level Validation Handlers (Parts 11, 12, 13)
+  const handlePhoneChange = async (val: string) => {
+    const cleaned = val.replace(/\D/g, '').slice(0, 10);
+    setMobile(cleaned);
+
+    if (cleaned.length === 0) {
+      setFormFieldIssues(prev => ({
+        ...prev,
+        mobile: validateFieldExplainable('mobile', 'Mobile Number', '', 1, 'Please enter a valid 10-digit phone number.')
+      }));
+      return;
+    }
+
+    const fmtIssue = validatePhoneExplainable(cleaned);
+    if (fmtIssue) {
+      setFormFieldIssues(prev => ({ ...prev, mobile: fmtIssue }));
+      return;
+    }
+
+    // Check duplicate phone only after format passes strictly
+    try {
+      const avail = await api.checkAvailability(undefined, cleaned);
+      if (!avail.available && avail.issue) {
+        setFormFieldIssues(prev => ({
+          ...prev,
+          mobile: avail.issue || validatePhoneExplainable(cleaned, true)
+        }));
+        return;
+      }
+    } catch (_) {}
+
+    setFormFieldIssues(prev => ({ ...prev, mobile: null }));
   };
 
+  const handleEmailBlur = async () => {
+    if (!email.trim()) {
+      setFormFieldIssues(prev => ({
+        ...prev,
+        email: validateFieldExplainable('email', 'Email Address', '', 1, 'Please enter a valid email address such as: example@gmail.com')
+      }));
+      return;
+    }
+
+    const fmtIssue = validateEmailExplainable(email);
+    if (fmtIssue) {
+      setFormFieldIssues(prev => ({ ...prev, email: fmtIssue }));
+      return;
+    }
+
+    // Check duplicate email
+    try {
+      const avail = await api.checkAvailability(email.trim().toLowerCase(), undefined);
+      if (!avail.available && avail.issue) {
+        setFormFieldIssues(prev => ({
+          ...prev,
+          email: avail.issue || validateEmailExplainable(email, true)
+        }));
+        return;
+      }
+    } catch (_) {}
+
+    setFormFieldIssues(prev => ({ ...prev, email: null }));
+  };
+
+  const handleFieldBlur = (fieldId: string, label: string, value: any, step: number = 1, hint?: string) => {
+    const issue = validateFieldExplainable(fieldId, label, value, step, hint);
+    setFormFieldIssues(prev => ({ ...prev, [fieldId]: issue }));
+  };
+
+  // Real-time Document Selection & Verification (Parts 1-10, 15, 17)
   const handleSelectDocument = async (
     e: React.ChangeEvent<HTMLInputElement>,
-    type: 'ST' | 'INC' | 'MARK' | 'ADM'
+    docCode: string
   ) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    if (file.size > 5 * 1024 * 1024) {
-      alert(`File "${file.name}" exceeds the 5 MB limit (${(file.size / 1024 / 1024).toFixed(1)} MB).`);
+    // Reset input value so re-selecting same file fires event
+    e.target.value = '';
+
+    // Synchronize legacy variables for backward compatibility
+    if (docCode === 'ST_CERTIFICATE') { setStCertFile(file.name); setStCertFileObj(file); }
+    else if (docCode === 'INCOME_CERTIFICATE') { setIncCertFile(file.name); setIncCertFileObj(file); }
+    else if (docCode === 'MARKSHEET') { setMarksheetFile(file.name); setMarksheetFileObj(file); }
+    else if (docCode === 'ADMISSION_PROOF') { setAdmissionFile(file.name); setAdmissionFileObj(file); }
+
+    // Part 17 Priority Check 1 & 2: Client validation (Size > 5MB, format, 0 bytes)
+    // "Do not run expensive OCR if basic file validation already fails."
+    const clientIssue = validateFileClientExplainable(file, docCode);
+    if (clientIssue) {
+      setDocSlots(prev => ({
+        ...prev,
+        [docCode]: {
+          file,
+          fileName: file.name,
+          status: 'ERROR',
+          requiredType: docCode,
+          message: clientIssue.what_is_wrong,
+          explainableIssue: clientIssue
+        }
+      }));
       return;
     }
 
-    const ext = '.' + file.name.split('.').pop()?.toLowerCase();
-    if (!['.pdf', '.jpg', '.jpeg', '.png'].includes(ext)) {
-      alert(`Unsupported file format "${ext}". Please upload a PDF, JPG, or PNG file.`);
-      return;
-    }
-
-    if (type === 'ST') {
-      setStCertFile(file.name);
-      setStCertFileObj(file);
-    } else if (type === 'INC') {
-      setIncCertFile(file.name);
-      setIncCertFileObj(file);
-    } else if (type === 'MARK') {
-      setMarksheetFile(file.name);
-      setMarksheetFileObj(file);
-    } else if (type === 'ADM') {
-      setAdmissionFile(file.name);
-      setAdmissionFileObj(file);
-    }
-
-    const reqType = docTypeMapping[type];
-
-    // Stage 1: Reading document text
-    setOcrStates((prev) => ({
+    // Run OCR + Document Classification
+    setDocSlots(prev => ({
       ...prev,
-      [type]: {
-        status: 'READING',
-        requiredType: reqType,
+      [docCode]: {
+        file,
         fileName: file.name,
-        message: 'Extracting text streams and running local OCR...'
+        status: 'READING',
+        requiredType: docCode,
+        message: 'Extracting text streams and running OCR...',
+        explainableIssue: null
       }
     }));
 
     try {
-      // Stage 2: Checking document type against rules
       setTimeout(() => {
-        setOcrStates((prev) => {
-          if (prev[type].status === 'READING') {
+        setDocSlots(prev => {
+          if (prev[docCode]?.status === 'READING') {
             return {
               ...prev,
-              [type]: {
-                ...prev[type],
+              [docCode]: {
+                ...prev[docCode],
                 status: 'CHECKING',
                 message: 'Verifying document type against scheme requirements...'
               }
@@ -191,142 +274,255 @@ export const ApplicationWizardPage: React.FC = () => {
           }
           return prev;
         });
-      }, 350);
+      }, 300);
 
-      const res = await api.verifyDocumentType(file, reqType, draftAppId || undefined);
+      const res = await api.verifyDocumentType(file, docCode, {
+        applicationId: draftAppId || undefined,
+        applicantName: fullName,
+        applicantDob: dob,
+        applicantAadhaar: rawAadhaarInput || maskedAadhaar
+      });
 
-      setOcrStates((prev) => ({
-        ...prev,
-        [type]: {
-          status: res.match_status as any,
-          detectedType: res.detected_document_type,
-          requiredType: res.required_document_type,
-          extractedFields: res.extracted_fields,
-          message: res.message,
-          fileName: file.name
-        }
-      }));
-    } catch (err: any) {
-      console.error(`Verification error for ${reqType}:`, err);
-      const errorDetail = err?.response?.data?.detail;
-      if (errorDetail?.verification_result) {
-        const vr = errorDetail.verification_result;
-        setOcrStates((prev) => ({
+      if (res.explainable_issue) {
+        setDocSlots(prev => ({
           ...prev,
-          [type]: {
-            status: vr.verification_status || 'TYPE_MISMATCH',
-            detectedType: vr.detected_document_type,
-            requiredType: vr.required_document_type,
-            extractedSnippet: vr.extracted_text_snippet,
-            extractedFields: vr.extracted_fields,
-            message: vr.message || errorDetail.message,
-            fileName: file.name
+          [docCode]: {
+            file,
+            fileName: file.name,
+            status: (res.match_status as any) || 'TYPE_MISMATCH',
+            detectedType: res.detected_document_type,
+            requiredType: res.required_document_type,
+            extractedFields: res.extracted_fields,
+            message: res.message,
+            explainableIssue: res.explainable_issue
           }
         }));
       } else {
-        setOcrStates((prev) => ({
+        setDocSlots(prev => ({
           ...prev,
-          [type]: {
-            status: 'MANUAL_REVIEW',
-            requiredType: reqType,
+          [docCode]: {
+            file,
             fileName: file.name,
-            message: 'Document scan could not be automatically verified. Queued for manual officer review.'
+            status: 'TYPE_MATCH',
+            detectedType: res.detected_document_type,
+            requiredType: res.required_document_type,
+            extractedFields: res.extracted_fields,
+            message: res.message || 'Verified Document Type',
+            explainableIssue: null
           }
         }));
+      }
+    } catch (err: any) {
+      console.error(`Verification error for ${docCode}:`, err);
+      const errorDetail = err?.response?.data?.detail;
+      const expIssue = errorDetail?.explainable_issue || (errorDetail?.verification_result?.explainable_issue);
+      if (expIssue) {
+        setDocSlots(prev => ({
+          ...prev,
+          [docCode]: {
+            file,
+            fileName: file.name,
+            status: 'TYPE_MISMATCH',
+            detectedType: errorDetail?.verification_result?.detected_document_type,
+            requiredType: docCode,
+            message: errorDetail?.message || expIssue.what_is_wrong,
+            explainableIssue: expIssue
+          }
+        }));
+      } else {
+        // Run client-side fallback inspector (handles offline / client-only mode)
+        const clientRes = await inspectDocumentClientFallback(file, docCode, {
+          fullName,
+          dob,
+          aadhaar: rawAadhaarInput || maskedAadhaar
+        });
+        if (clientRes.explainable_issue) {
+          setDocSlots(prev => ({
+            ...prev,
+            [docCode]: {
+              file,
+              fileName: file.name,
+              status: (clientRes.match_status as any) || 'TYPE_MISMATCH',
+              detectedType: clientRes.detected_document_type,
+              requiredType: docCode,
+              message: clientRes.explainable_issue!.what_is_wrong,
+              explainableIssue: clientRes.explainable_issue,
+              extractedFields: clientRes.extracted_fields
+            }
+          }));
+        } else {
+          setDocSlots(prev => ({
+            ...prev,
+            [docCode]: {
+              file,
+              fileName: file.name,
+              status: 'TYPE_MATCH',
+              detectedType: clientRes.detected_document_type,
+              requiredType: docCode,
+              message: 'Verified Document Type',
+              explainableIssue: null,
+              extractedFields: clientRes.extracted_fields
+            }
+          }));
+        }
       }
     }
   };
 
-  const renderOcrStatusBadge = (slotKey: 'ST' | 'INC' | 'MARK' | 'ADM') => {
-    const ocr = ocrStates[slotKey];
-    if (ocr.status === 'READING' || ocr.status === 'CHECKING') {
-      return (
-        <div className="mt-2.5 p-2.5 rounded bg-blue-50 border border-blue-200 text-blue-900 text-xs flex items-center gap-2 animate-pulse">
-          <div className="w-3.5 h-3.5 border-2 border-blue-600 border-t-transparent rounded-full animate-spin flex-shrink-0" />
-          <span className="font-semibold">{ocr.message || 'Extracting and analyzing document text...'}</span>
-        </div>
-      );
+  const handleRemoveDocument = (docCode: string) => {
+    setDocSlots(prev => {
+      const updated = { ...prev };
+      delete updated[docCode];
+      return updated;
+    });
+    if (docCode === 'ST_CERTIFICATE') { setStCertFile(''); setStCertFileObj(null); }
+    else if (docCode === 'INCOME_CERTIFICATE') { setIncCertFile(''); setIncCertFileObj(null); }
+    else if (docCode === 'MARKSHEET') { setMarksheetFile(''); setMarksheetFileObj(null); }
+    else if (docCode === 'ADMISSION_PROOF') { setAdmissionFile(''); setAdmissionFileObj(null); }
+  };
+
+  // Aggregated issues across the whole application (Part 16)
+  const allIssues = React.useMemo<ExplainableIssue[]>(() => {
+    const issues: ExplainableIssue[] = [];
+
+    // 1. Form field issues
+    Object.values(formFieldIssues).forEach((iss) => {
+      if (iss) issues.push(iss);
+    });
+
+    // 2. Document slot issues
+    Object.entries(docSlots).forEach(([code, slot]) => {
+      if (slot?.explainableIssue) {
+        issues.push(slot.explainableIssue);
+      }
+    });
+
+    // 3. Scheme-specific missing documents (if on Step 5 or beyond)
+    if (currentStep >= 5) {
+      schemeRequiredDocs.forEach((req: any) => {
+        const hasFile = Boolean(
+          docSlots[req.code]?.fileName ||
+          (req.code === 'ST_CERTIFICATE' && stCertFile) ||
+          (req.code === 'INCOME_CERTIFICATE' && incCertFile) ||
+          (req.code === 'MARKSHEET' && marksheetFile) ||
+          (req.code === 'ADMISSION_PROOF' && admissionFile) ||
+          reusedDocMap[req.code]
+        );
+        const hasSlotIssue = Boolean(docSlots[req.code]?.explainableIssue);
+        if (req.required && !hasFile && !hasSlotIssue) {
+          issues.push({
+            status: 'ERROR',
+            category: 'MISSING_DOCUMENT',
+            field_id: req.code,
+            step: 5,
+            what_is_wrong: 'Required Document Missing',
+            why_is_wrong: `This application requires a ${req.name}.`,
+            expected: req.name,
+            provided: 'Not uploaded',
+            action: `Please upload: ${req.name}`,
+            summary: `This application requires ${req.name}.`
+          });
+        }
+      });
     }
-    if (ocr.status === 'TYPE_MATCH') {
-      return (
-        <div className="mt-2.5 p-2.5 rounded bg-emerald-50 border border-emerald-300 text-emerald-950 text-xs flex items-start gap-2">
-          <CheckCircle2 className="w-4 h-4 text-emerald-600 flex-shrink-0 mt-0.5" />
-          <div className="space-y-0.5 flex-1">
-            <div className="font-bold flex items-center gap-2">
-              <span>Verified Document Type: {ocr.detectedType}</span>
-            </div>
-            <p className="text-[11px] text-emerald-800">{ocr.message}</p>
-            {ocr.extractedFields && Object.keys(ocr.extractedFields).length > 0 && (
-              <div className="text-[10px] font-mono text-emerald-900 mt-1 flex flex-wrap gap-x-3 gap-y-0.5">
-                {ocr.extractedFields.certificate_number && (
-                  <span>Cert/Reg No: <strong>{ocr.extractedFields.certificate_number}</strong></span>
-                )}
-                {ocr.extractedFields.annual_income && (
-                  <span>Income: <strong>₹{Number(ocr.extractedFields.annual_income).toLocaleString('en-IN')}</strong></span>
-                )}
-                {ocr.extractedFields.community && (
-                  <span>Community: <strong>{ocr.extractedFields.community}</strong></span>
-                )}
-                {ocr.extractedFields.issuing_authority && (
-                  <span>Authority: <strong>{ocr.extractedFields.issuing_authority}</strong></span>
-                )}
-              </div>
-            )}
-          </div>
-        </div>
-      );
+
+    return issues;
+  }, [formFieldIssues, docSlots, schemeRequiredDocs, currentStep, stCertFile, incCertFile, marksheetFile, admissionFile, reusedDocMap]);
+
+  // Deep-link jump to exact field or document slot (Part 16)
+  const handleJumpToIssue = (issue: ExplainableIssue) => {
+    if (issue.step) {
+      setCurrentStep(issue.step);
     }
-    if (ocr.status === 'TYPE_MISMATCH') {
-      return (
-        <div className="mt-2.5 p-3 rounded bg-red-50 border border-red-300 text-red-950 text-xs flex items-start gap-2.5">
-          <AlertTriangle className="w-4 h-4 text-red-600 flex-shrink-0 mt-0.5" />
-          <div className="space-y-1 flex-1">
-            <div className="font-bold text-red-900 flex items-center gap-2">
-              <span>Document Type Mismatch!</span>
-              <span className="px-1.5 py-0.2 bg-red-200 text-red-950 text-[10px] rounded font-mono font-bold">
-                Detected: {ocr.detectedType || 'UNEXPECTED'}
-              </span>
-            </div>
-            <p className="text-[11px] text-red-800">
-              {ocr.message || `Expected a ${ocr.requiredType}, but this file was recognized as ${ocr.detectedType}.`}
-            </p>
-            <div className="text-[10px] text-red-700 font-semibold">
-              Action required: Please click &quot;Change File&quot; and upload the authentic {ocr.requiredType?.replace(/_/g, ' ')}.
-            </div>
-          </div>
-        </div>
-      );
+    setTimeout(() => {
+      const el =
+        (issue.field_id && document.getElementById(`field-${issue.field_id}`)) ||
+        (issue.field_id && document.getElementById(`doc-slot-${issue.field_id}`));
+      if (el) {
+        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        const input = el.querySelector('input, select, textarea');
+        if (input instanceof HTMLElement) {
+          input.focus();
+        } else if (el instanceof HTMLElement) {
+          el.focus();
+        }
+      }
+    }, 120);
+  };
+
+  // Step-level navigation validation
+  const validateStepNavigation = (fromStep: number): boolean => {
+    if (fromStep === 1) {
+      const issues: Record<string, ExplainableIssue | null> = {};
+      if (!fullName.trim()) {
+        issues['fullName'] = validateFieldExplainable('fullName', 'Full Name', '', 1, 'Please enter your full name as per Aadhaar.');
+      }
+      if (!dob) {
+        issues['dob'] = validateFieldExplainable('dob', 'Date of Birth', '', 1, 'Please enter your date of birth before continuing.');
+      }
+      if (!mobile.trim() || mobile.replace(/\D/g, '').length !== 10) {
+        issues['mobile'] = validatePhoneExplainable(mobile) || validateFieldExplainable('mobile', 'Mobile Number', '', 1, 'Please enter a valid 10-digit mobile number.');
+      }
+      if (!tribeCommunity.trim()) {
+        issues['tribeCommunity'] = validateFieldExplainable('tribeCommunity', 'Tribe / Community', '', 1, 'Please specify your Tribe or Community.');
+      }
+      if (!state.trim()) {
+        issues['state'] = validateFieldExplainable('state', 'Domicile State', '', 1, 'Please enter your domicile state.');
+      }
+      if (!district.trim()) {
+        issues['district'] = validateFieldExplainable('district', 'District', '', 1, 'Please enter your district.');
+      }
+      if (!pincode.trim()) {
+        issues['pincode'] = validateFieldExplainable('pincode', 'Pincode', '', 1, 'Please enter a valid 6-digit pincode.');
+      }
+      if (!hasSavedProfile && (!rawAadhaarInput || rawAadhaarInput.length !== 12)) {
+        issues['aadhaar'] = {
+          status: 'ERROR',
+          category: 'FIELD_REQUIRED',
+          field_id: 'aadhaar',
+          step: 1,
+          what_is_wrong: '12-Digit Aadhaar Required',
+          why_is_wrong: 'A complete 12-digit Aadhaar number is required for statutory identity verification.',
+          expected: '12-digit Aadhaar number',
+          provided: rawAadhaarInput ? `${rawAadhaarInput.length} digits` : 'Empty',
+          action: 'Please enter your 12-digit Aadhaar number.',
+          summary: 'Aadhaar number must contain 12 digits.'
+        };
+      }
+
+      setFormFieldIssues(prev => ({ ...prev, ...issues }));
+      const errorList = Object.values(issues).filter(i => i !== null && i.status === 'ERROR') as ExplainableIssue[];
+      if (errorList.length > 0) {
+        handleJumpToIssue(errorList[0]);
+        return false;
+      }
     }
-    if (ocr.status === 'LOW_QUALITY') {
-      return (
-        <div className="mt-2.5 p-3 rounded bg-amber-50 border border-amber-300 text-amber-950 text-xs flex items-start gap-2.5">
-          <AlertTriangle className="w-4 h-4 text-amber-600 flex-shrink-0 mt-0.5" />
-          <div className="space-y-1 flex-1">
-            <div className="font-bold text-amber-900">
-              Unreadable Scan / Low Quality
-            </div>
-            <p className="text-[11px] text-amber-800">
-              {ocr.message || 'Insufficient text extracted from this scan (< 20 characters).'}
-            </p>
-            <div className="text-[10px] text-amber-700 font-semibold">
-              Action required: Please upload a clearer, higher-resolution scan or digital PDF.
-            </div>
-          </div>
-        </div>
-      );
+
+    if (fromStep === 4) {
+      const issues: Record<string, ExplainableIssue | null> = {};
+      if (!accountNumber.trim()) {
+        issues['accountNumber'] = validateFieldExplainable('accountNumber', 'Bank Account Number', '', 4, 'Please enter your bank account number.');
+      }
+      if (!ifscCode.trim()) {
+        issues['ifscCode'] = validateFieldExplainable('ifscCode', 'IFSC Code', '', 4, 'Please enter a valid 11-character IFSC code.');
+      }
+      setFormFieldIssues(prev => ({ ...prev, ...issues }));
+      const errorList = Object.values(issues).filter(i => i !== null && i.status === 'ERROR') as ExplainableIssue[];
+      if (errorList.length > 0) {
+        handleJumpToIssue(errorList[0]);
+        return false;
+      }
     }
-    if (ocr.status === 'MANUAL_REVIEW') {
-      return (
-        <div className="mt-2.5 p-2.5 rounded bg-slate-100 border border-slate-300 text-slate-900 text-xs flex items-start gap-2">
-          <Eye className="w-4 h-4 text-slate-600 flex-shrink-0 mt-0.5" />
-          <div>
-            <span className="font-bold">Queued for Manual Review: </span>
-            <span className="text-[11px] text-slate-700">{ocr.message}</span>
-          </div>
-        </div>
-      );
+
+    if (fromStep === 5) {
+      const step5Issues = allIssues.filter(i => i.step === 5 && i.status === 'ERROR');
+      if (step5Issues.length > 0) {
+        handleJumpToIssue(step5Issues[0]);
+        return false;
+      }
     }
-    return null;
+
+    return true;
   };
 
   // ===============================
@@ -353,11 +549,23 @@ export const ApplicationWizardPage: React.FC = () => {
     return results;
   }, [stCertFile, incCertFile, marksheetFile, fullName, annualFamilyIncome]);
 
-  const requiredDocumentsUploaded = Boolean(stCertFile && incCertFile && marksheetFile && admissionFile);
-  const allOcrPassed = ocrResults.every(r => r.overallDocStatus === 'VERIFIED');
+  const requiredDocumentsUploaded = schemeRequiredDocs
+    .filter((r: any) => r.required)
+    .every((req: any) =>
+      Boolean(
+        docSlots[req.code]?.fileName ||
+        (req.code === 'ST_CERTIFICATE' && stCertFile) ||
+        (req.code === 'INCOME_CERTIFICATE' && incCertFile) ||
+        (req.code === 'MARKSHEET' && marksheetFile) ||
+        (req.code === 'ADMISSION_PROOF' && admissionFile) ||
+        reusedDocMap[req.code]
+      )
+    );
+  const hasAnyBlockingIssue = allIssues.some((i) => i.status === 'ERROR');
+  const allOcrPassed = !hasAnyBlockingIssue;
   const isEligible = eligibilityResult.overallStatus === 'ELIGIBLE';
   
-  const canSubmit = requiredDocumentsUploaded && allOcrPassed && isEligible;
+  const canSubmit = requiredDocumentsUploaded && !hasAnyBlockingIssue && isEligible;
 
   // Load existing profile and reusable documents on mount
   useEffect(() => {
@@ -418,18 +626,31 @@ export const ApplicationWizardPage: React.FC = () => {
 
           // Fetch reusable certificates strictly belonging to this authenticated user
           try {
-            const docs = await api.getReusableDocuments();
+            const docs = await api.getReusableDocuments(selectedSchemeId);
             if (isMounted && docs && docs.length > 0) {
               setReusableDocs(docs);
               const rMap: Record<string, any> = {};
+              const initialSlots: Record<string, DocSlotState> = {};
               docs.forEach((d: any) => {
-                rMap[d.document_type] = d;
-                if (d.document_type === 'ST_CERTIFICATE') setStCertFile(d.file_name);
-                if (d.document_type === 'INCOME_CERTIFICATE') setIncCertFile(d.file_name);
-                if (d.document_type === 'MARKSHEET') setMarksheetFile(d.file_name);
-                if (d.document_type === 'ADMISSION_PROOF') setAdmissionFile(d.file_name);
+                if (d.is_reusable !== false) {
+                  rMap[d.document_type] = d;
+                  initialSlots[d.document_type] = {
+                    file: null,
+                    fileName: d.file_name,
+                    status: 'TYPE_MATCH',
+                    detectedType: d.document_type,
+                    requiredType: d.document_type,
+                    message: 'Reused verified document from previous application',
+                    explainableIssue: null
+                  };
+                  if (d.document_type === 'ST_CERTIFICATE') setStCertFile(d.file_name);
+                  if (d.document_type === 'INCOME_CERTIFICATE') setIncCertFile(d.file_name);
+                  if (d.document_type === 'MARKSHEET') setMarksheetFile(d.file_name);
+                  if (d.document_type === 'ADMISSION_PROOF') setAdmissionFile(d.file_name);
+                }
               });
               setReusedDocMap(rMap);
+              setDocSlots(prev => ({ ...initialSlots, ...prev }));
             }
           } catch (docErr) {
             console.warn('Could not fetch reusable certificates:', docErr);
@@ -670,38 +891,21 @@ export const ApplicationWizardPage: React.FC = () => {
     }
 
     if (!eSignConsent) {
-      alert('Please accept the statutory Aadhaar e-Sign declaration to complete submission.');
+      const chk = document.getElementById('field-esign-consent');
+      if (chk) chk.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      return;
+    }
+
+    const blockingIssues = allIssues.filter((i) => i.status === 'ERROR');
+    if (blockingIssues.length > 0) {
+      handleJumpToIssue(blockingIssues[0]);
       return;
     }
 
     if (!canSubmit) {
-      alert('Application cannot be submitted. All mandatory verification checks and eligibility criteria must pass first.');
-      return;
-    }
-
-    if (!fullName.trim()) {
-      alert('Please enter your Full Name in Step 1.');
-      setCurrentStep(1);
-      return;
-    }
-    if (!dob) {
-      alert('Please enter your Date of Birth in Step 1.');
-      setCurrentStep(1);
-      return;
-    }
-    if (!mobile.trim() || mobile.replace(/\D/g, '').length !== 10) {
-      alert('Please enter a valid 10-digit Mobile Number in Step 1.');
-      setCurrentStep(1);
-      return;
-    }
-    if (!tribeCommunity.trim()) {
-      alert('Please specify your Tribe / Community in Step 1.');
-      setCurrentStep(1);
-      return;
-    }
-    if (!state.trim() || !district.trim() || !pincode.trim()) {
-      alert('Please complete your Address details (State, District, Pincode) in Step 1.');
-      setCurrentStep(1);
+      if (allIssues.length > 0) {
+        handleJumpToIssue(allIssues[0]);
+      }
       return;
     }
 
@@ -712,9 +916,33 @@ export const ApplicationWizardPage: React.FC = () => {
     // 1. If first-time applicant, persist profile to MongoDB Atlas with Aadhaar Verhoeff check FIRST
     if (!hasSavedProfile) {
       if (!rawAadhaarInput || rawAadhaarInput.length !== 12) {
-        alert('Please enter your complete 12-digit Aadhaar number for statutory identity verification.');
+        setFormFieldIssues((prev) => ({
+          ...prev,
+          aadhaar: {
+            status: 'ERROR',
+            category: 'FIELD_REQUIRED',
+            field_id: 'aadhaar',
+            step: 1,
+            what_is_wrong: '12-Digit Aadhaar Required',
+            why_is_wrong: 'A complete 12-digit Aadhaar number is required for statutory identity verification.',
+            expected: '12-digit Aadhaar number',
+            provided: rawAadhaarInput ? `${rawAadhaarInput.length} digits` : 'Empty',
+            action: 'Please enter your 12-digit Aadhaar number.',
+            summary: 'Aadhaar number must contain 12 digits.'
+          }
+        }));
+        handleJumpToIssue({
+          status: 'ERROR',
+          category: 'FIELD_REQUIRED',
+          field_id: 'aadhaar',
+          step: 1,
+          what_is_wrong: '12-Digit Aadhaar Required',
+          why_is_wrong: 'A complete 12-digit Aadhaar number is required for statutory identity verification.',
+          expected: '12-digit Aadhaar number',
+          provided: 'Incomplete',
+          action: 'Please enter your 12-digit Aadhaar number.'
+        });
         setIsSubmitting(false);
-        setCurrentStep(1);
         return;
       }
       try {
@@ -1255,7 +1483,17 @@ export const ApplicationWizardPage: React.FC = () => {
       </div>
 
       {/* Main Form Container */}
-      <div className="bg-white p-6 rounded border border-slate-300 shadow-sm text-xs">
+      <div className="bg-white p-6 rounded border border-slate-300 shadow-sm text-xs space-y-4">
+        {/* Top Global Explainable Validation Summary Banner (Part 16) */}
+        {allIssues.length > 0 && (
+          <div className="mb-4">
+            <ValidationSummaryBanner
+              issues={allIssues}
+              onSelectIssue={handleJumpToIssue}
+            />
+          </div>
+        )}
+
         {/* STEP 1: PROFILE */}
         {currentStep === 1 && (
           <div className="space-y-4">
@@ -1293,19 +1531,35 @@ export const ApplicationWizardPage: React.FC = () => {
             )}
 
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-              <div>
+              <div id="field-fullName">
                 <label className="block font-bold text-slate-700 mb-1">Full Name (as per Aadhaar):</label>
                 <input
                   type="text"
                   value={fullName}
-                  onChange={(e) => setFullName(e.target.value)}
+                  onChange={(e) => {
+                    setFullName(e.target.value);
+                    if (formFieldIssues['fullName'] && e.target.value.trim()) {
+                      setFormFieldIssues((prev) => ({ ...prev, fullName: null }));
+                    }
+                  }}
+                  onBlur={() => handleFieldBlur('fullName', 'Full Name', fullName, 1, 'Please enter your full name as per Aadhaar.')}
                   placeholder="Enter full name"
-                  className="w-full p-2 bg-white border border-slate-300 rounded font-semibold text-slate-900"
+                  className={`w-full p-2 bg-white border rounded font-semibold text-slate-900 ${
+                    formFieldIssues['fullName'] ? 'border-red-400 bg-red-50/20 ring-1 ring-red-300' : 'border-slate-300'
+                  }`}
                   required
                 />
+                {formFieldIssues['fullName'] && (
+                  <div className="mt-1.5">
+                    <ExplainableErrorCard
+                      issue={formFieldIssues['fullName']}
+                      onActionClick={() => document.getElementById('field-fullName')?.querySelector('input')?.focus()}
+                    />
+                  </div>
+                )}
               </div>
 
-              <div>
+              <div id="field-fatherName">
                 <label className="block font-bold text-slate-700 mb-1">Father's / Husband's Name:</label>
                 <input
                   type="text"
@@ -1316,7 +1570,7 @@ export const ApplicationWizardPage: React.FC = () => {
                 />
               </div>
 
-              <div>
+              <div id="field-gender">
                 <label className="block font-bold text-slate-700 mb-1">Gender:</label>
                 <select
                   value={gender}
@@ -1330,19 +1584,35 @@ export const ApplicationWizardPage: React.FC = () => {
                 </select>
               </div>
 
-              <div>
+              <div id="field-dob">
                 <label className="block font-bold text-slate-700 mb-1">Date of Birth (YYYY-MM-DD):</label>
                 <input
                   type="date"
                   value={dob}
-                  onChange={(e) => setDob(e.target.value)}
-                  className="w-full p-2 bg-white border border-slate-300 rounded font-medium"
+                  onChange={(e) => {
+                    setDob(e.target.value);
+                    if (formFieldIssues['dob'] && e.target.value) {
+                      setFormFieldIssues((prev) => ({ ...prev, dob: null }));
+                    }
+                  }}
+                  onBlur={() => handleFieldBlur('dob', 'Date of Birth', dob, 1, 'Please enter your date of birth before continuing.')}
+                  className={`w-full p-2 bg-white border rounded font-medium ${
+                    formFieldIssues['dob'] ? 'border-red-400 bg-red-50/20 ring-1 ring-red-300' : 'border-slate-300'
+                  }`}
                   required
                 />
+                {formFieldIssues['dob'] && (
+                  <div className="mt-1.5">
+                    <ExplainableErrorCard
+                      issue={formFieldIssues['dob']}
+                      onActionClick={() => document.getElementById('field-dob')?.querySelector('input')?.focus()}
+                    />
+                  </div>
+                )}
               </div>
 
               {hasSavedProfile ? (
-                <div>
+                <div id="field-aadhaar">
                   <label className="block font-bold text-slate-700 mb-1">Aadhaar Number (Verified & Masked):</label>
                   <div className="relative">
                     <input
@@ -1355,24 +1625,61 @@ export const ApplicationWizardPage: React.FC = () => {
                   </div>
                 </div>
               ) : (
-                <div>
+                <div id="field-aadhaar">
                   <label className="block font-bold text-slate-700 mb-1">12-Digit Aadhaar Number:</label>
                   <input
                     type="text"
                     maxLength={12}
                     placeholder="Enter 12 digits (Verhoeff Check)"
                     value={rawAadhaarInput}
-                    onChange={(e) => setRawAadhaarInput(e.target.value.replace(/\D/g, '').slice(0, 12))}
-                    className="w-full p-2 bg-white border border-blue-400 rounded font-mono font-bold text-blue-900 focus:ring-2 focus:ring-blue-700"
+                    onChange={(e) => {
+                      const val = e.target.value.replace(/\D/g, '').slice(0, 12);
+                      setRawAadhaarInput(val);
+                      if (formFieldIssues['aadhaar'] && val.length === 12) {
+                        setFormFieldIssues((prev) => ({ ...prev, aadhaar: null }));
+                      }
+                    }}
+                    onBlur={() => {
+                      if (!rawAadhaarInput || rawAadhaarInput.length !== 12) {
+                        setFormFieldIssues((prev) => ({
+                          ...prev,
+                          aadhaar: {
+                            status: 'ERROR',
+                            category: 'FIELD_REQUIRED',
+                            field_id: 'aadhaar',
+                            step: 1,
+                            what_is_wrong: '12-Digit Aadhaar Required',
+                            why_is_wrong: 'A complete 12-digit Aadhaar number is required for statutory identity verification.',
+                            expected: '12-digit Aadhaar number',
+                            provided: rawAadhaarInput ? `${rawAadhaarInput.length} digits` : 'Empty',
+                            action: 'Please enter your 12-digit Aadhaar number.',
+                            summary: 'Aadhaar number must contain 12 digits.'
+                          }
+                        }));
+                      } else {
+                        setFormFieldIssues((prev) => ({ ...prev, aadhaar: null }));
+                      }
+                    }}
+                    className={`w-full p-2 bg-white border rounded font-mono font-bold text-blue-900 focus:ring-2 focus:ring-blue-700 ${
+                      formFieldIssues['aadhaar'] ? 'border-red-400 bg-red-50/20' : 'border-blue-400'
+                    }`}
                     required
                   />
+                  {formFieldIssues['aadhaar'] && (
+                    <div className="mt-1.5">
+                      <ExplainableErrorCard
+                        issue={formFieldIssues['aadhaar']}
+                        onActionClick={() => document.getElementById('field-aadhaar')?.querySelector('input')?.focus()}
+                      />
+                    </div>
+                  )}
                   <span className="text-[10px] text-slate-500 mt-0.5 block">
                     Validated via statutory Verhoeff checksum. Stored as encrypted hash.
                   </span>
                 </div>
               )}
 
-              <div>
+              <div id="field-category">
                 <label className="block font-bold text-slate-700 mb-1">Category:</label>
                 <select
                   value={category}
@@ -1384,69 +1691,162 @@ export const ApplicationWizardPage: React.FC = () => {
                 </select>
               </div>
 
-              <div>
+              <div id="field-tribeCommunity">
                 <label className="block font-bold text-slate-700 mb-1">Tribe / Sub-Caste Community:</label>
                 <input
                   type="text"
                   value={tribeCommunity}
-                  onChange={(e) => setTribeCommunity(e.target.value)}
+                  onChange={(e) => {
+                    setTribeCommunity(e.target.value);
+                    if (formFieldIssues['tribeCommunity'] && e.target.value.trim()) {
+                      setFormFieldIssues((prev) => ({ ...prev, tribeCommunity: null }));
+                    }
+                  }}
+                  onBlur={() => handleFieldBlur('tribeCommunity', 'Tribe / Community', tribeCommunity, 1, 'Please specify your Tribe or Community.')}
                   placeholder="e.g. Santhal, Gond, Bhil, Oraon"
-                  className="w-full p-2 bg-white border border-slate-300 rounded font-medium"
+                  className={`w-full p-2 bg-white border rounded font-medium ${
+                    formFieldIssues['tribeCommunity'] ? 'border-red-400 bg-red-50/20 ring-1 ring-red-300' : 'border-slate-300'
+                  }`}
                   required
                 />
+                {formFieldIssues['tribeCommunity'] && (
+                  <div className="mt-1.5">
+                    <ExplainableErrorCard
+                      issue={formFieldIssues['tribeCommunity']}
+                      onActionClick={() => document.getElementById('field-tribeCommunity')?.querySelector('input')?.focus()}
+                    />
+                  </div>
+                )}
               </div>
 
-              <div>
+              <div id="field-mobile">
                 <label className="block font-bold text-slate-700 mb-1">Mobile Number (10 digits):</label>
                 <input
                   type="tel"
                   maxLength={10}
                   value={mobile}
-                  onChange={(e) => setMobile(e.target.value.replace(/\D/g, '').slice(0, 10))}
+                  onChange={(e) => handlePhoneChange(e.target.value)}
+                  onBlur={() => handlePhoneChange(mobile)}
                   placeholder="10-digit Indian mobile"
-                  className="w-full p-2 bg-white border border-slate-300 rounded font-mono font-bold"
+                  className={`w-full p-2 bg-white border rounded font-mono font-bold ${
+                    formFieldIssues['mobile'] ? 'border-red-400 bg-red-50/20 ring-1 ring-red-300' : 'border-slate-300'
+                  }`}
                   required
                 />
+                {formFieldIssues['mobile'] && (
+                  <div className="mt-1.5">
+                    <ExplainableErrorCard
+                      issue={formFieldIssues['mobile']}
+                      onActionClick={() => document.getElementById('field-mobile')?.querySelector('input')?.focus()}
+                    />
+                  </div>
+                )}
               </div>
 
-              <div>
+              <div id="field-email">
                 <label className="block font-bold text-slate-700 mb-1">Email ID:</label>
                 <input
                   type="email"
                   value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  className="w-full p-2 bg-white border border-slate-300 rounded"
+                  onChange={(e) => {
+                    setEmail(e.target.value);
+                    if (formFieldIssues['email']) {
+                      setFormFieldIssues((prev) => ({ ...prev, email: null }));
+                    }
+                  }}
+                  onBlur={handleEmailBlur}
+                  placeholder="example@gmail.com"
+                  className={`w-full p-2 bg-white border rounded ${
+                    formFieldIssues['email'] ? 'border-red-400 bg-red-50/20 ring-1 ring-red-300' : 'border-slate-300'
+                  }`}
                 />
+                {formFieldIssues['email'] && (
+                  <div className="mt-1.5">
+                    <ExplainableErrorCard
+                      issue={formFieldIssues['email']}
+                      onActionClick={() => document.getElementById('field-email')?.querySelector('input')?.focus()}
+                    />
+                  </div>
+                )}
               </div>
 
-              <div>
+              <div id="field-state">
                 <label className="block font-bold text-slate-700 mb-1">Domicile State:</label>
                 <input
                   type="text"
                   value={state}
-                  onChange={(e) => setState(e.target.value)}
-                  className="w-full p-2 bg-white border border-slate-300 rounded"
+                  onChange={(e) => {
+                    setState(e.target.value);
+                    if (formFieldIssues['state'] && e.target.value.trim()) {
+                      setFormFieldIssues((prev) => ({ ...prev, state: null }));
+                    }
+                  }}
+                  onBlur={() => handleFieldBlur('state', 'Domicile State', state, 1, 'Please enter your domicile state.')}
+                  className={`w-full p-2 bg-white border rounded ${
+                    formFieldIssues['state'] ? 'border-red-400 bg-red-50/20 ring-1 ring-red-300' : 'border-slate-300'
+                  }`}
                 />
+                {formFieldIssues['state'] && (
+                  <div className="mt-1.5">
+                    <ExplainableErrorCard
+                      issue={formFieldIssues['state']}
+                      onActionClick={() => document.getElementById('field-state')?.querySelector('input')?.focus()}
+                    />
+                  </div>
+                )}
               </div>
 
-              <div>
+              <div id="field-district">
                 <label className="block font-bold text-slate-700 mb-1">District:</label>
                 <input
                   type="text"
                   value={district}
-                  onChange={(e) => setDistrict(e.target.value)}
-                  className="w-full p-2 bg-white border border-slate-300 rounded"
+                  onChange={(e) => {
+                    setDistrict(e.target.value);
+                    if (formFieldIssues['district'] && e.target.value.trim()) {
+                      setFormFieldIssues((prev) => ({ ...prev, district: null }));
+                    }
+                  }}
+                  onBlur={() => handleFieldBlur('district', 'District', district, 1, 'Please enter your district.')}
+                  className={`w-full p-2 bg-white border rounded ${
+                    formFieldIssues['district'] ? 'border-red-400 bg-red-50/20 ring-1 ring-red-300' : 'border-slate-300'
+                  }`}
                 />
+                {formFieldIssues['district'] && (
+                  <div className="mt-1.5">
+                    <ExplainableErrorCard
+                      issue={formFieldIssues['district']}
+                      onActionClick={() => document.getElementById('field-district')?.querySelector('input')?.focus()}
+                    />
+                  </div>
+                )}
               </div>
 
-              <div>
+              <div id="field-pincode">
                 <label className="block font-bold text-slate-700 mb-1">Pincode:</label>
                 <input
                   type="text"
+                  maxLength={6}
                   value={pincode}
-                  onChange={(e) => setPincode(e.target.value)}
-                  className="w-full p-2 bg-white border border-slate-300 rounded font-mono"
+                  onChange={(e) => {
+                    setPincode(e.target.value);
+                    if (formFieldIssues['pincode'] && e.target.value.trim()) {
+                      setFormFieldIssues((prev) => ({ ...prev, pincode: null }));
+                    }
+                  }}
+                  onBlur={() => handleFieldBlur('pincode', 'Pincode', pincode, 1, 'Please enter a valid 6-digit pincode.')}
+                  className={`w-full p-2 bg-white border rounded font-mono ${
+                    formFieldIssues['pincode'] ? 'border-red-400 bg-red-50/20 ring-1 ring-red-300' : 'border-slate-300'
+                  }`}
                 />
+                {formFieldIssues['pincode'] && (
+                  <div className="mt-1.5">
+                    <ExplainableErrorCard
+                      issue={formFieldIssues['pincode']}
+                      onActionClick={() => document.getElementById('field-pincode')?.querySelector('input')?.focus()}
+                    />
+                  </div>
+                )}
               </div>
             </div>
           </div>
@@ -1480,6 +1880,52 @@ export const ApplicationWizardPage: React.FC = () => {
                 ))}
               </select>
             </div>
+
+            {/* DUPLICATE APPLICATION CHECK & WARNING */}
+            {(() => {
+              const dupApp = applications.find(
+                (a) =>
+                  (a.schemeId === selectedSchemeId || a.schemeCode === selectedSchemeId) &&
+                  a.status !== 'REJECTED' &&
+                  a.status !== 'DRAFT'
+              );
+              if (!dupApp) return null;
+              return (
+                <div className="bg-amber-50 border-2 border-amber-500 rounded-lg p-4 space-y-3">
+                  <div className="flex items-start gap-3">
+                    <AlertTriangle className="w-5 h-5 text-amber-600 flex-shrink-0 mt-0.5" />
+                    <div className="flex-1">
+                      <h4 className="text-xs font-black uppercase text-amber-950 tracking-wider">
+                        You already have an application for this scheme.
+                      </h4>
+                      <p className="text-xs text-amber-900 mt-1">
+                        Applicants cannot submit duplicate active applications for the same scheme. You can view your current application status or select a different scheme.
+                      </p>
+                      <div className="mt-2.5 font-mono text-xs text-slate-800 space-y-1 bg-white/90 p-2.5 rounded border border-amber-200">
+                        <div>
+                          <span className="text-slate-500 font-sans">Application ID:</span>{' '}
+                          <strong className="font-bold text-slate-900">{dupApp.id}</strong>
+                        </div>
+                        <div>
+                          <span className="text-slate-500 font-sans">Current Status:</span>{' '}
+                          <strong className="font-bold text-amber-900">{dupApp.status}</strong>
+                        </div>
+                      </div>
+                      <div className="mt-3">
+                        <button
+                          type="button"
+                          onClick={() => navigate('/applicant/dashboard')}
+                          className="px-3.5 py-1.5 bg-[#0b2853] hover:bg-[#134685] text-white text-xs font-bold rounded shadow-sm inline-flex items-center gap-1.5"
+                        >
+                          <span>View Application</span>
+                          <ExternalLink className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              );
+            })()}
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2">
               <div>
@@ -1689,24 +2135,61 @@ export const ApplicationWizardPage: React.FC = () => {
                 />
               </div>
 
-              <div>
+              <div id="field-accountNumber">
                 <label className="block font-bold text-slate-700 mb-1">Bank Account Number:</label>
                 <input
                   type="text"
                   value={accountNumber}
-                  onChange={(e) => setAccountNumber(e.target.value)}
-                  className="w-full p-2 bg-white border border-slate-300 rounded font-mono font-bold"
+                  onChange={(e) => {
+                    setAccountNumber(e.target.value);
+                    if (formFieldIssues['accountNumber'] && e.target.value.trim()) {
+                      setFormFieldIssues((prev) => ({ ...prev, accountNumber: null }));
+                    }
+                  }}
+                  onBlur={() => handleFieldBlur('accountNumber', 'Bank Account Number', accountNumber, 4, 'Please enter your bank account number.')}
+                  placeholder="Enter bank account number"
+                  className={`w-full p-2 bg-white border rounded font-mono font-bold ${
+                    formFieldIssues['accountNumber'] ? 'border-red-400 bg-red-50/20 ring-1 ring-red-300' : 'border-slate-300'
+                  }`}
+                  required
                 />
+                {formFieldIssues['accountNumber'] && (
+                  <div className="mt-1.5">
+                    <ExplainableErrorCard
+                      issue={formFieldIssues['accountNumber']}
+                      onActionClick={() => document.getElementById('field-accountNumber')?.querySelector('input')?.focus()}
+                    />
+                  </div>
+                )}
               </div>
 
-              <div>
+              <div id="field-ifscCode">
                 <label className="block font-bold text-slate-700 mb-1">IFSC Code:</label>
                 <input
                   type="text"
+                  maxLength={11}
                   value={ifscCode}
-                  onChange={(e) => setIfscCode(e.target.value)}
-                  className="w-full p-2 bg-white border border-slate-300 rounded font-mono font-bold uppercase"
+                  onChange={(e) => {
+                    setIfscCode(e.target.value.toUpperCase());
+                    if (formFieldIssues['ifscCode'] && e.target.value.trim()) {
+                      setFormFieldIssues((prev) => ({ ...prev, ifscCode: null }));
+                    }
+                  }}
+                  onBlur={() => handleFieldBlur('ifscCode', 'IFSC Code', ifscCode, 4, 'Please enter a valid 11-character IFSC code.')}
+                  placeholder="e.g. SBIN0001234"
+                  className={`w-full p-2 bg-white border rounded font-mono font-bold uppercase ${
+                    formFieldIssues['ifscCode'] ? 'border-red-400 bg-red-50/20 ring-1 ring-red-300' : 'border-slate-300'
+                  }`}
+                  required
                 />
+                {formFieldIssues['ifscCode'] && (
+                  <div className="mt-1.5">
+                    <ExplainableErrorCard
+                      issue={formFieldIssues['ifscCode']}
+                      onActionClick={() => document.getElementById('field-ifscCode')?.querySelector('input')?.focus()}
+                    />
+                  </div>
+                )}
               </div>
 
               <div>
@@ -1774,272 +2257,223 @@ export const ApplicationWizardPage: React.FC = () => {
               </div>
             )}
 
-            {/* Document Mismatch Alert Banner */}
-            {Object.values(ocrStates).some((s) => s.status === 'TYPE_MISMATCH') && (
-              <div className="p-3 bg-red-50 border border-red-300 rounded text-red-900 text-xs flex items-center gap-2">
-                <AlertTriangle className="w-5 h-5 text-red-600 flex-shrink-0" />
-                <div>
-                  <span className="font-bold">Attention: Document Type Mismatch Detected!</span> One or more uploaded certificates do not match the expected category. Please upload the correct certificates before proceeding.
-                </div>
-              </div>
-            )}
+            {/* Dynamic Scheme Document Slots (Parts 1-10, 15, 17, 22) */}
+            <div className="space-y-4">
+              {schemeRequiredDocs.map((reqDoc: any, idx: number) => {
+                const slot = docSlots[reqDoc.code];
+                const legacyName =
+                  reqDoc.code === 'ST_CERTIFICATE' ? stCertFile :
+                  reqDoc.code === 'INCOME_CERTIFICATE' ? incCertFile :
+                  reqDoc.code === 'MARKSHEET' ? marksheetFile :
+                  reqDoc.code === 'ADMISSION_PROOF' ? admissionFile : '';
+                const activeFileName = slot?.fileName || legacyName || reusedDocMap[reqDoc.code]?.file_name || '';
+                const hasReused = Boolean(reusedDocMap[reqDoc.code] && !slot?.file);
 
-            <div className="space-y-3">
-              {/* ST Certificate */}
-              <div className="p-3.5 bg-slate-50 border border-slate-200 rounded">
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                  <div>
-                    <div className="font-bold text-slate-900">1. ST Caste / Tribe Community Certificate</div>
-                    <div className="text-[11px] font-mono">
-                      {stCertFile ? (
-                        <span className="text-slate-800">Current file: <strong>{stCertFile}</strong></span>
-                      ) : (
-                        <span className="text-amber-700 italic">No document selected yet</span>
-                      )}
-                    </div>
-                    {reusedDocMap['ST_CERTIFICATE'] && !stCertFileObj && (
-                      <span className="inline-flex items-center gap-1 text-[10px] text-emerald-700 font-bold mt-0.5">
-                        <CheckCircle2 className="w-3 h-3" />
-                        Reusing verified certificate from previous application
-                      </span>
-                    )}
-                  </div>
-                  <div className="flex items-center gap-2">
-                    {ocrStates.ST.status === 'TYPE_MATCH' ? (
-                      <span className="text-[10px] bg-emerald-100 text-emerald-800 font-bold px-2 py-0.5 rounded border border-emerald-300">
-                        VERIFIED MATCH
-                      </span>
-                    ) : ocrStates.ST.status === 'TYPE_MISMATCH' ? (
-                      <span className="text-[10px] bg-red-100 text-red-800 font-bold px-2 py-0.5 rounded border border-red-300 animate-pulse">
-                        TYPE MISMATCH
-                      </span>
-                    ) : ocrStates.ST.status === 'LOW_QUALITY' ? (
-                      <span className="text-[10px] bg-amber-100 text-amber-800 font-bold px-2 py-0.5 rounded border border-amber-300">
-                        LOW QUALITY
-                      </span>
-                    ) : ocrStates.ST.status === 'READING' || ocrStates.ST.status === 'CHECKING' ? (
-                      <span className="text-[10px] bg-blue-100 text-blue-800 font-bold px-2 py-0.5 rounded border border-blue-300 animate-pulse">
-                        VERIFYING...
-                      </span>
-                    ) : ocrStates.ST.status === 'MANUAL_REVIEW' ? (
-                      <span className="text-[10px] bg-slate-200 text-slate-800 font-bold px-2 py-0.5 rounded border border-slate-300">
-                        MANUAL REVIEW
-                      </span>
-                    ) : stCertFile ? (
-                      <span className="text-[10px] bg-emerald-100 text-emerald-800 font-bold px-2 py-0.5 rounded">
-                        OCR READY
-                      </span>
-                    ) : (
-                      <span className="text-[10px] bg-amber-100 text-amber-800 font-bold px-2 py-0.5 rounded">
-                        PENDING UPLOAD
-                      </span>
-                    )}
-                    <label className="cursor-pointer px-3 py-1.5 bg-white border border-slate-300 rounded font-semibold text-slate-700 hover:bg-slate-100 flex items-center gap-1">
-                      <Upload className="w-3.5 h-3.5" />
-                      <span>{reusedDocMap['ST_CERTIFICATE'] && !stCertFileObj ? 'Replace Scan' : stCertFile ? 'Change File' : 'Upload File'}</span>
-                      <input
-                        type="file"
-                        accept=".pdf,.jpg,.jpeg,.png"
-                        className="sr-only"
-                        onChange={(e) => handleSelectDocument(e, 'ST')}
-                      />
-                    </label>
-                  </div>
-                </div>
-                {renderOcrStatusBadge('ST')}
-              </div>
+                return (
+                  <div
+                    key={reqDoc.code}
+                    id={`doc-slot-${reqDoc.code}`}
+                    className="p-4 bg-slate-50 border border-slate-200 rounded-lg space-y-3"
+                  >
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                      <div>
+                        <div className="font-bold text-slate-900 text-sm flex items-center gap-2">
+                          <span>{idx + 1}. {reqDoc.name}</span>
+                          {reqDoc.required && (
+                            <span className="text-[10px] bg-red-100 text-red-700 font-bold px-1.5 py-0.5 rounded">
+                              Mandatory
+                            </span>
+                          )}
+                        </div>
+                        {reqDoc.description && (
+                          <p className="text-[11px] text-slate-500 mt-0.5">{reqDoc.description}</p>
+                        )}
+                        <div className="text-[11px] font-mono mt-1">
+                          {activeFileName ? (
+                            <span className="text-slate-800">
+                              Current file: <strong>{activeFileName}</strong>
+                            </span>
+                          ) : (
+                            <span className="text-amber-700 italic">No document selected yet</span>
+                          )}
+                        </div>
+                        {hasReused && (
+                          <span className="inline-flex items-center gap-1 text-[10px] text-emerald-700 font-bold mt-0.5">
+                            <CheckCircle2 className="w-3 h-3" />
+                            Reusing verified certificate from previous application
+                          </span>
+                        )}
+                      </div>
 
-              {/* Income Certificate */}
-              <div className="p-3.5 bg-slate-50 border border-slate-200 rounded">
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                  <div>
-                    <div className="font-bold text-slate-900">2. Competent Tehsildar Income Certificate (FY 2024-25)</div>
-                    <div className="text-[11px] font-mono">
-                      {incCertFile ? (
-                        <span className="text-slate-800">Current file: <strong>{incCertFile}</strong></span>
-                      ) : (
-                        <span className="text-amber-700 italic">No document selected yet</span>
-                      )}
-                    </div>
-                    {reusedDocMap['INCOME_CERTIFICATE'] && !incCertFileObj && (
-                      <span className="inline-flex items-center gap-1 text-[10px] text-emerald-700 font-bold mt-0.5">
-                        <CheckCircle2 className="w-3 h-3" />
-                        Reusing verified certificate from previous application
-                      </span>
-                    )}
-                  </div>
-                  <div className="flex items-center gap-2">
-                    {ocrStates.INC.status === 'TYPE_MATCH' ? (
-                      <span className="text-[10px] bg-emerald-100 text-emerald-800 font-bold px-2 py-0.5 rounded border border-emerald-300">
-                        VERIFIED MATCH
-                      </span>
-                    ) : ocrStates.INC.status === 'TYPE_MISMATCH' ? (
-                      <span className="text-[10px] bg-red-100 text-red-800 font-bold px-2 py-0.5 rounded border border-red-300 animate-pulse">
-                        TYPE MISMATCH
-                      </span>
-                    ) : ocrStates.INC.status === 'LOW_QUALITY' ? (
-                      <span className="text-[10px] bg-amber-100 text-amber-800 font-bold px-2 py-0.5 rounded border border-amber-300">
-                        LOW QUALITY
-                      </span>
-                    ) : ocrStates.INC.status === 'READING' || ocrStates.INC.status === 'CHECKING' ? (
-                      <span className="text-[10px] bg-blue-100 text-blue-800 font-bold px-2 py-0.5 rounded border border-blue-300 animate-pulse">
-                        VERIFYING...
-                      </span>
-                    ) : ocrStates.INC.status === 'MANUAL_REVIEW' ? (
-                      <span className="text-[10px] bg-slate-200 text-slate-800 font-bold px-2 py-0.5 rounded border border-slate-300">
-                        MANUAL REVIEW
-                      </span>
-                    ) : incCertFile ? (
-                      <span className="text-[10px] bg-emerald-100 text-emerald-800 font-bold px-2 py-0.5 rounded">
-                        OCR READY
-                      </span>
-                    ) : (
-                      <span className="text-[10px] bg-amber-100 text-amber-800 font-bold px-2 py-0.5 rounded">
-                        PENDING UPLOAD
-                      </span>
-                    )}
-                    <label className="cursor-pointer px-3 py-1.5 bg-white border border-slate-300 rounded font-semibold text-slate-700 hover:bg-slate-100 flex items-center gap-1">
-                      <Upload className="w-3.5 h-3.5" />
-                      <span>{reusedDocMap['INCOME_CERTIFICATE'] && !incCertFileObj ? 'Replace Scan' : incCertFile ? 'Change File' : 'Upload File'}</span>
-                      <input
-                        type="file"
-                        accept=".pdf,.jpg,.jpeg,.png"
-                        className="sr-only"
-                        onChange={(e) => handleSelectDocument(e, 'INC')}
-                      />
-                    </label>
-                  </div>
-                </div>
-                {renderOcrStatusBadge('INC')}
-              </div>
+                      <div className="flex items-center gap-2 flex-wrap sm:flex-nowrap">
+                        {slot?.explainableIssue ? (
+                          <span className="text-[10px] bg-red-100 text-red-800 font-bold px-2 py-0.5 rounded border border-red-300 animate-pulse">
+                            {slot.explainableIssue.what_is_wrong}
+                          </span>
+                        ) : slot?.status === 'TYPE_MATCH' ? (
+                          <span className="text-[10px] bg-emerald-100 text-emerald-800 font-bold px-2 py-0.5 rounded border border-emerald-300">
+                            VERIFIED MATCH
+                          </span>
+                        ) : slot?.status === 'READING' || slot?.status === 'CHECKING' ? (
+                          <span className="text-[10px] bg-blue-100 text-blue-800 font-bold px-2 py-0.5 rounded border border-blue-300 animate-pulse">
+                            VERIFYING...
+                          </span>
+                        ) : slot?.status === 'MANUAL_REVIEW' ? (
+                          <span className="text-[10px] bg-slate-200 text-slate-800 font-bold px-2 py-0.5 rounded border border-slate-300">
+                            MANUAL REVIEW
+                          </span>
+                        ) : activeFileName ? (
+                          <span className="text-[10px] bg-emerald-100 text-emerald-800 font-bold px-2 py-0.5 rounded">
+                            UPLOADED
+                          </span>
+                        ) : (
+                          <span className="text-[10px] bg-amber-100 text-amber-800 font-bold px-2 py-0.5 rounded">
+                            PENDING UPLOAD
+                          </span>
+                        )}
 
-              {/* Marksheet */}
-              <div className="p-3.5 bg-slate-50 border border-slate-200 rounded">
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                  <div>
-                    <div className="font-bold text-slate-900">3. Previous Qualifying Marksheet / Degree Certificate</div>
-                    <div className="text-[11px] font-mono">
-                      {marksheetFile ? (
-                        <span className="text-slate-800">Current file: <strong>{marksheetFile}</strong></span>
-                      ) : (
-                        <span className="text-amber-700 italic">No document selected yet</span>
-                      )}
+                        <label className="cursor-pointer px-3 py-1.5 bg-white border border-slate-300 hover:bg-slate-100 rounded font-semibold text-slate-700 flex items-center gap-1 text-xs shadow-xs">
+                          <Upload className="w-3.5 h-3.5" />
+                          <span>{activeFileName ? 'Change File' : 'Upload File'}</span>
+                          <input
+                            id={`file-input-${reqDoc.code}`}
+                            type="file"
+                            accept=".pdf,.jpg,.jpeg,.png,.docx"
+                            className="sr-only"
+                            onChange={(e) => handleSelectDocument(e, reqDoc.code)}
+                          />
+                        </label>
+                      </div>
                     </div>
-                    {reusedDocMap['MARKSHEET'] && !marksheetFileObj && (
-                      <span className="inline-flex items-center gap-1 text-[10px] text-emerald-700 font-bold mt-0.5">
-                        <CheckCircle2 className="w-3 h-3" />
-                        Reusing verified certificate from previous application
-                      </span>
-                    )}
-                  </div>
-                  <div className="flex items-center gap-2">
-                    {ocrStates.MARK.status === 'TYPE_MATCH' ? (
-                      <span className="text-[10px] bg-emerald-100 text-emerald-800 font-bold px-2 py-0.5 rounded border border-emerald-300">
-                        VERIFIED MATCH
-                      </span>
-                    ) : ocrStates.MARK.status === 'TYPE_MISMATCH' ? (
-                      <span className="text-[10px] bg-red-100 text-red-800 font-bold px-2 py-0.5 rounded border border-red-300 animate-pulse">
-                        TYPE MISMATCH
-                      </span>
-                    ) : ocrStates.MARK.status === 'LOW_QUALITY' ? (
-                      <span className="text-[10px] bg-amber-100 text-amber-800 font-bold px-2 py-0.5 rounded border border-amber-300">
-                        LOW QUALITY
-                      </span>
-                    ) : ocrStates.MARK.status === 'READING' || ocrStates.MARK.status === 'CHECKING' ? (
-                      <span className="text-[10px] bg-blue-100 text-blue-800 font-bold px-2 py-0.5 rounded border border-blue-300 animate-pulse">
-                        VERIFYING...
-                      </span>
-                    ) : ocrStates.MARK.status === 'MANUAL_REVIEW' ? (
-                      <span className="text-[10px] bg-slate-200 text-slate-800 font-bold px-2 py-0.5 rounded border border-slate-300">
-                        MANUAL REVIEW
-                      </span>
-                    ) : marksheetFile ? (
-                      <span className="text-[10px] bg-emerald-100 text-emerald-800 font-bold px-2 py-0.5 rounded">
-                        OCR READY
-                      </span>
-                    ) : (
-                      <span className="text-[10px] bg-amber-100 text-amber-800 font-bold px-2 py-0.5 rounded">
-                        PENDING UPLOAD
-                      </span>
-                    )}
-                    <label className="cursor-pointer px-3 py-1.5 bg-white border border-slate-300 rounded font-semibold text-slate-700 hover:bg-slate-100 flex items-center gap-1">
-                      <Upload className="w-3.5 h-3.5" />
-                      <span>{reusedDocMap['MARKSHEET'] && !marksheetFileObj ? 'Replace Scan' : marksheetFile ? 'Change File' : 'Upload File'}</span>
-                      <input
-                        type="file"
-                        accept=".pdf,.jpg,.jpeg,.png"
-                        className="sr-only"
-                        onChange={(e) => handleSelectDocument(e, 'MARK')}
-                      />
-                    </label>
-                  </div>
-                </div>
-                {renderOcrStatusBadge('MARK')}
-              </div>
 
-              {/* Admission Letter */}
-              <div className="p-3.5 bg-slate-50 border border-slate-200 rounded">
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                  <div>
-                    <div className="font-bold text-slate-900">4. University Admission / Research Joining Report</div>
-                    <div className="text-[11px] font-mono">
-                      {admissionFile ? (
-                        <span className="text-slate-800">Current file: <strong>{admissionFile}</strong></span>
-                      ) : (
-                        <span className="text-amber-700 italic">No document selected yet</span>
-                      )}
-                    </div>
-                    {reusedDocMap['ADMISSION_PROOF'] && !admissionFileObj && (
-                      <span className="inline-flex items-center gap-1 text-[10px] text-emerald-700 font-bold mt-0.5">
-                        <CheckCircle2 className="w-3 h-3" />
-                        Reusing verified document from previous application
-                      </span>
-                    )}
-                  </div>
-                  <div className="flex items-center gap-2">
-                    {ocrStates.ADM.status === 'TYPE_MATCH' ? (
-                      <span className="text-[10px] bg-emerald-100 text-emerald-800 font-bold px-2 py-0.5 rounded border border-emerald-300">
-                        VERIFIED MATCH
-                      </span>
-                    ) : ocrStates.ADM.status === 'TYPE_MISMATCH' ? (
-                      <span className="text-[10px] bg-red-100 text-red-800 font-bold px-2 py-0.5 rounded border border-red-300 animate-pulse">
-                        TYPE MISMATCH
-                      </span>
-                    ) : ocrStates.ADM.status === 'LOW_QUALITY' ? (
-                      <span className="text-[10px] bg-amber-100 text-amber-800 font-bold px-2 py-0.5 rounded border border-amber-300">
-                        LOW QUALITY
-                      </span>
-                    ) : ocrStates.ADM.status === 'READING' || ocrStates.ADM.status === 'CHECKING' ? (
-                      <span className="text-[10px] bg-blue-100 text-blue-800 font-bold px-2 py-0.5 rounded border border-blue-300 animate-pulse">
-                        VERIFYING...
-                      </span>
-                    ) : ocrStates.ADM.status === 'MANUAL_REVIEW' ? (
-                      <span className="text-[10px] bg-slate-200 text-slate-800 font-bold px-2 py-0.5 rounded border border-slate-300">
-                        MANUAL REVIEW
-                      </span>
-                    ) : admissionFile ? (
-                      <span className="text-[10px] bg-emerald-100 text-emerald-800 font-bold px-2 py-0.5 rounded">
-                        OCR READY
-                      </span>
-                    ) : (
-                      <span className="text-[10px] bg-amber-100 text-amber-800 font-bold px-2 py-0.5 rounded">
-                        PENDING UPLOAD
-                      </span>
-                    )}
-                    <label className="cursor-pointer px-3 py-1.5 bg-white border border-slate-300 rounded font-semibold text-slate-700 hover:bg-slate-100 flex items-center gap-1">
-                      <Upload className="w-3.5 h-3.5" />
-                      <span>{reusedDocMap['ADMISSION_PROOF'] && !admissionFileObj ? 'Replace Scan' : admissionFile ? 'Change File' : 'Upload File'}</span>
-                      <input
-                        type="file"
-                        accept=".pdf,.jpg,.jpeg,.png"
-                        className="sr-only"
-                        onChange={(e) => handleSelectDocument(e, 'ADM')}
+                    {/* SECTION 7, 8, 9: DOCUMENT REUSE, REPLACEMENT & VALIDITY */}
+                    {(() => {
+                      const existingDoc = reusableDocs.find((d) => d.document_type === reqDoc.code);
+                      if (!existingDoc) return null;
+
+                      if (existingDoc.is_reusable !== false) {
+                        return (
+                          <div className="bg-emerald-50/70 border border-emerald-300 rounded p-3 space-y-2">
+                            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                              <div>
+                                <div className="text-xs font-bold text-emerald-950 flex items-center gap-1.5">
+                                  <CheckCircle2 className="w-4 h-4 text-emerald-700" />
+                                  <span>Existing document found: {reqDoc.name}</span>
+                                </div>
+                                <p className="text-[11px] text-emerald-800 mt-0.5 font-mono">
+                                  File: <strong>{existingDoc.file_name}</strong> • Uploaded: {existingDoc.uploaded_at} • Verification Status: <strong className="text-emerald-700">{existingDoc.verification_status || 'VERIFIED'}</strong>
+                                </p>
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setReusedDocMap((prev) => ({ ...prev, [reqDoc.code]: existingDoc }));
+                                    setDocSlots((prev) => ({
+                                      ...prev,
+                                      [reqDoc.code]: {
+                                        file: null,
+                                        fileName: existingDoc.file_name,
+                                        status: 'TYPE_MATCH',
+                                        detectedType: reqDoc.name,
+                                        requiredType: reqDoc.code,
+                                        message: `Linked verified existing document (v${existingDoc.version || 1})`,
+                                        explainableIssue: null,
+                                      },
+                                    }));
+                                  }}
+                                  className={`px-3 py-1.5 rounded text-xs font-bold transition-all shadow-xs ${
+                                    hasReused
+                                      ? 'bg-emerald-700 text-white'
+                                      : 'bg-white hover:bg-emerald-100 text-emerald-900 border border-emerald-300'
+                                  }`}
+                                >
+                                  {hasReused ? '✓ Using Existing' : 'Use Existing'}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    document.getElementById(`file-input-${reqDoc.code}`)?.click();
+                                  }}
+                                  className="px-3 py-1.5 bg-white hover:bg-slate-100 text-slate-700 border border-slate-300 rounded text-xs font-semibold shadow-xs"
+                                >
+                                  Replace
+                                </button>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      } else {
+                        return (
+                          <div className="bg-rose-50 border border-rose-300 rounded p-3 space-y-2">
+                            <div className="flex items-start gap-2">
+                              <XCircle className="w-4 h-4 text-rose-600 flex-shrink-0 mt-0.5" />
+                              <div className="space-y-1 flex-1">
+                                <div className="text-xs font-bold text-rose-950">
+                                  Existing {reqDoc.name} cannot be reused.
+                                </div>
+                                <div className="text-[11px] text-rose-900 whitespace-pre-line bg-white/80 p-2 rounded border border-rose-200 font-mono">
+                                  {existingDoc.ineligibility_reason || 'Certificate does not satisfy validity criteria for this scheme.'}
+                                </div>
+                                <div className="pt-1">
+                                  <button
+                                    type="button"
+                                    onClick={() => document.getElementById(`file-input-${reqDoc.code}`)?.click()}
+                                    className="px-3 py-1.5 bg-rose-700 hover:bg-rose-800 text-white rounded text-xs font-bold shadow-xs inline-flex items-center gap-1.5"
+                                  >
+                                    <Upload className="w-3.5 h-3.5" />
+                                    <span>Upload New Document</span>
+                                  </button>
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      }
+                    })()}
+
+                    {/* Inline Explainable Error Card directly under this slot */}
+                    {slot?.explainableIssue ? (
+                      <ExplainableErrorCard
+                        issue={slot.explainableIssue}
+                        onReplace={() => document.getElementById(`file-input-${reqDoc.code}`)?.click()}
+                        onRemove={() => handleRemoveDocument(reqDoc.code)}
                       />
-                    </label>
+                    ) : slot?.status === 'TYPE_MATCH' ? (
+                      <div className="p-2.5 rounded bg-emerald-50 border border-emerald-300 text-emerald-950 text-xs flex items-start gap-2">
+                        <CheckCircle2 className="w-4 h-4 text-emerald-600 flex-shrink-0 mt-0.5" />
+                        <div className="space-y-0.5 flex-1">
+                          <div className="font-bold">
+                            Verified Document Type: {slot.detectedType || reqDoc.name}
+                          </div>
+                          <p className="text-[11px] text-emerald-800">{slot.message}</p>
+                          {slot.extractedFields && Object.keys(slot.extractedFields).length > 0 && (
+                            <div className="text-[10px] font-mono text-emerald-900 mt-1 flex flex-wrap gap-x-3 gap-y-0.5">
+                              {slot.extractedFields.certificate_number && (
+                                <span>Cert/Reg No: <strong>{slot.extractedFields.certificate_number}</strong></span>
+                              )}
+                              {slot.extractedFields.annual_income && (
+                                <span>Income: <strong>₹{Number(slot.extractedFields.annual_income).toLocaleString('en-IN')}</strong></span>
+                              )}
+                              {slot.extractedFields.community && (
+                                <span>Community: <strong>{slot.extractedFields.community}</strong></span>
+                              )}
+                              {slot.extractedFields.issuing_authority && (
+                                <span>Authority: <strong>{slot.extractedFields.issuing_authority}</strong></span>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    ) : slot?.status === 'READING' || slot?.status === 'CHECKING' ? (
+                      <div className="p-2.5 rounded bg-blue-50 border border-blue-200 text-blue-900 text-xs flex items-center gap-2 animate-pulse">
+                        <div className="w-3.5 h-3.5 border-2 border-blue-600 border-t-transparent rounded-full animate-spin flex-shrink-0" />
+                        <span className="font-semibold">{slot.message || 'Extracting text and verifying document...'}</span>
+                      </div>
+                    ) : null}
                   </div>
-                </div>
-                {renderOcrStatusBadge('ADM')}
-              </div>
+                );
+              })}
             </div>
           </div>
         )}
@@ -2059,52 +2493,42 @@ export const ApplicationWizardPage: React.FC = () => {
               </p>
             </div>
 
-            {/* Real OCR Verification Viewers */}
-            <DocumentOcrViewer
-              documentType="ST_CERTIFICATE"
-              applicantName={fullName}
-              declaredIncome={Number(annualFamilyIncome) || 0}
-              isDeficientScenario={false}
-              fileName={stCertFile}
-              isLiveUpload={!!stCertFileObj}
-              ocrVerification={ocrStates.ST.status !== 'IDLE' ? {
-                status: ocrStates.ST.status,
-                message: ocrStates.ST.message,
-                detectedType: ocrStates.ST.detectedType || undefined,
-                extractedFields: ocrStates.ST.extractedFields
-              } : undefined}
-            />
+            {/* Real OCR Verification Viewers (Dynamic per Scheme) */}
+            <div className="space-y-4">
+              {schemeRequiredDocs.map((reqDoc: any) => {
+                const slot = docSlots[reqDoc.code];
+                const legacyName =
+                  reqDoc.code === 'ST_CERTIFICATE' ? stCertFile :
+                  reqDoc.code === 'INCOME_CERTIFICATE' ? incCertFile :
+                  reqDoc.code === 'MARKSHEET' ? marksheetFile :
+                  reqDoc.code === 'ADMISSION_PROOF' ? admissionFile : '';
+                const fileName = slot?.fileName || legacyName || reusedDocMap[reqDoc.code]?.file_name;
+                if (!fileName) return null;
 
-            <DocumentOcrViewer
-              documentType="INCOME_CERTIFICATE"
-              applicantName={fullName}
-              declaredIncome={Number(annualFamilyIncome) || 0}
-              isDeficientScenario={false}
-              fileName={incCertFile}
-              isLiveUpload={!!incCertFileObj}
-              ocrVerification={ocrStates.INC.status !== 'IDLE' ? {
-                status: ocrStates.INC.status,
-                message: ocrStates.INC.message,
-                detectedType: ocrStates.INC.detectedType || undefined,
-                extractedFields: ocrStates.INC.extractedFields
-              } : undefined}
-            />
-
-            {marksheetFile && (
-              <DocumentOcrViewer
-                documentType="MARKSHEET"
-                applicantName={fullName}
-                isDeficientScenario={false}
-                fileName={marksheetFile}
-                isLiveUpload={!!marksheetFileObj}
-                ocrVerification={ocrStates.MARK.status !== 'IDLE' ? {
-                  status: ocrStates.MARK.status,
-                  message: ocrStates.MARK.message,
-                  detectedType: ocrStates.MARK.detectedType || undefined,
-                  extractedFields: ocrStates.MARK.extractedFields
-                } : undefined}
-              />
-            )}
+                return (
+                  <DocumentOcrViewer
+                    key={reqDoc.code}
+                    documentType={reqDoc.code as any}
+                    applicantName={fullName}
+                    declaredIncome={Number(annualFamilyIncome) || 0}
+                    isDeficientScenario={false}
+                    fileName={fileName}
+                    isLiveUpload={!!slot?.file}
+                    ocrVerification={
+                      slot
+                        ? {
+                            status: slot.status,
+                            message: slot.message,
+                            detectedType: slot.detectedType || undefined,
+                            extractedFields: slot.extractedFields
+                          }
+                        : undefined
+                    }
+                    isOfficerMode={false}
+                  />
+                );
+              })}
+            </div>
 
             {/* Explainable Decision Card */}
             <div className="bg-slate-50 border border-slate-200 rounded p-4 mt-6">
@@ -2315,12 +2739,8 @@ export const ApplicationWizardPage: React.FC = () => {
             <button
               type="button"
               onClick={() => {
-                if (currentStep === 5) {
-                  const mismatches = Object.entries(ocrStates).filter(([_, s]) => s.status === 'TYPE_MISMATCH');
-                  if (mismatches.length > 0) {
-                    alert('Document Type Mismatch Detected: Please replace the mismatched document with the required certificate type before proceeding.');
-                    return;
-                  }
+                if (!validateStepNavigation(currentStep)) {
+                  return;
                 }
                 setCurrentStep((prev) => Math.min(prev + 1, 8));
               }}

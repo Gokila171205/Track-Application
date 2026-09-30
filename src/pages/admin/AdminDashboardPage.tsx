@@ -14,14 +14,46 @@ import {
 } from 'lucide-react';
 import { Link, useNavigate } from 'react-router-dom';
 import { getSchemeWindowStatus } from '../../utils/schemeWindow';
+import { api } from '../../services/api';
 
 export const AdminDashboardPage: React.FC = () => {
   const { applications, schemes, auditLogs } = useApp();
   const navigate = useNavigate();
 
+  const [dbStats, setDbStats] = React.useState<{
+    totalApplications: number;
+    submitted: number;
+    pendingDocumentVerification: number;
+    pendingEligibilityVerification: number;
+    underScrutiny: number;
+    deficient: number;
+    resubmitted: number;
+    approved: number;
+    rejected: number;
+  } | null>(null);
+
+  React.useEffect(() => {
+    api.getAdminDashboardStats()
+      .then((data) => setDbStats(data))
+      .catch((err) => console.warn('Could not fetch real-time stats:', err));
+  }, []);
+
+  // Compute fallback counts from loaded real MongoDB applications if API is still loading
+  const stats = {
+    totalApplications: dbStats?.totalApplications ?? applications.length,
+    submitted: dbStats?.submitted ?? applications.filter(a => a.status === 'SUBMITTED').length,
+    pendingDocumentVerification: dbStats?.pendingDocumentVerification ?? applications.filter(a => a.status === 'DOCUMENT_VERIFICATION').length,
+    pendingEligibilityVerification: dbStats?.pendingEligibilityVerification ?? applications.filter(a => a.status === 'ELIGIBILITY_VERIFICATION').length,
+    underScrutiny: dbStats?.underScrutiny ?? applications.filter(a => a.status === 'SCRUTINY').length,
+    deficient: dbStats?.deficient ?? applications.filter(a => a.hasDeficiency || a.status === 'DEFICIENT' || a.status === 'DEFICIENCY_NOTIFIED').length,
+    resubmitted: dbStats?.resubmitted ?? applications.filter(a => a.status === 'RESUBMITTED').length,
+    approved: dbStats?.approved ?? applications.filter(a => ['APPROVED', 'SELECTION'].includes(a.status)).length,
+    rejected: dbStats?.rejected ?? applications.filter(a => a.status === 'REJECTED').length,
+  };
+
   // Recent Activity
   const recentActivity = auditLogs
-    .filter(log => ['Application Started', 'New Application Submitted', 'Application Submitted', 'Application Resubmitted', 'Application Approved', 'Application Rejected'].includes(log.action))
+    .filter(log => ['Application Started', 'New Application Submitted', 'Application Submitted', 'Application Resubmitted', 'Application Approved', 'Application Rejected', 'DOCUMENT_VERIFIED', 'DOCUMENT_REJECTED', 'DEFICIENCY_ISSUED'].includes(log.action))
     .slice(0, 8);
 
   // Scheme Stats
@@ -40,6 +72,18 @@ export const AdminDashboardPage: React.FC = () => {
     };
   });
 
+  const countCards = [
+    { label: 'Total Applications', count: stats.totalApplications, status: 'ALL', color: 'border-slate-300 text-slate-800 bg-slate-50' },
+    { label: 'Submitted', count: stats.submitted, status: 'SUBMITTED', color: 'border-blue-200 text-blue-900 bg-blue-50' },
+    { label: 'Pending Doc Verification', count: stats.pendingDocumentVerification, status: 'DOCUMENT_VERIFICATION', color: 'border-amber-200 text-amber-900 bg-amber-50' },
+    { label: 'Pending Eligibility', count: stats.pendingEligibilityVerification, status: 'ELIGIBILITY_VERIFICATION', color: 'border-indigo-200 text-indigo-900 bg-indigo-50' },
+    { label: 'Under Scrutiny', count: stats.underScrutiny, status: 'SCRUTINY', color: 'border-purple-200 text-purple-900 bg-purple-50' },
+    { label: 'Deficient', count: stats.deficient, status: 'DEFICIENT', color: 'border-rose-200 text-rose-900 bg-rose-50' },
+    { label: 'Resubmitted', count: stats.resubmitted, status: 'RESUBMITTED', color: 'border-cyan-200 text-cyan-900 bg-cyan-50' },
+    { label: 'Approved', count: stats.approved, status: 'APPROVED', color: 'border-emerald-200 text-emerald-900 bg-emerald-50' },
+    { label: 'Rejected', count: stats.rejected, status: 'REJECTED', color: 'border-red-200 text-red-900 bg-red-50' },
+  ];
+
   return (
     <div className="space-y-6">
       {/* Top Banner */}
@@ -47,17 +91,35 @@ export const AdminDashboardPage: React.FC = () => {
         <div>
           <div className="flex items-center gap-2 mb-1">
             <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">
-              Executive Analytics
+              Executive Analytics & Scrutiny
             </span>
           </div>
           <h1 className="text-xl sm:text-2xl font-black text-[#0b2853] tracking-tight flex items-center gap-2">
             <Building2 className="w-6 h-6 text-amber-500" />
-            Scholarship & Fellowship Schemes
+            Scholarship & Fellowship Governance
           </h1>
           <p className="text-xs text-slate-600 mt-0.5">
-            Select a scheme to view specific analytics, application pipelines, and perform official scrutiny.
+            Real-time scrutiny status directly from MongoDB Atlas (tsfms). Click any counter to inspect filtered queue.
           </p>
         </div>
+      </div>
+
+      {/* Real MongoDB Status Counts Banner */}
+      <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 lg:grid-cols-9 gap-2.5">
+        {countCards.map((card, idx) => (
+          <div
+            key={idx}
+            onClick={() => navigate(card.status === 'ALL' ? '/admin/applications' : `/admin/applications?status=${card.status}`)}
+            className={`p-3 rounded border ${card.color} shadow-sm cursor-pointer hover:shadow-md hover:scale-[1.02] transition-all flex flex-col justify-between`}
+            title={`Click to filter applications by ${card.label}`}
+          >
+            <span className="text-[10px] font-bold uppercase tracking-wider line-clamp-1">{card.label}</span>
+            <div className="text-xl font-black mt-1">{card.count}</div>
+            <span className="text-[9px] text-slate-500 mt-1 flex items-center gap-0.5 font-medium">
+              View queue →
+            </span>
+          </div>
+        ))}
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">

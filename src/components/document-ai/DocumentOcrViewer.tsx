@@ -18,6 +18,7 @@ interface DocumentOcrViewerProps {
     detectedType?: string;
     extractedFields?: Record<string, string | null>;
   };
+  isOfficerMode?: boolean;
 }
 
 export const DocumentOcrViewer: React.FC<DocumentOcrViewerProps> = ({
@@ -28,7 +29,8 @@ export const DocumentOcrViewer: React.FC<DocumentOcrViewerProps> = ({
   documentId,
   fileName,
   isLiveUpload = false,
-  ocrVerification
+  ocrVerification,
+  isOfficerMode = false
 }) => {
   const result: DocumentVerificationResult = simulateDocumentOcr(
     documentType,
@@ -125,25 +127,27 @@ export const DocumentOcrViewer: React.FC<DocumentOcrViewerProps> = ({
             </span>
           )}
 
-          {/* Toggle between fields and raw OCR */}
-          <div className="flex border border-slate-300 rounded overflow-hidden">
-            <button
-              onClick={() => setActiveView('FIELDS')}
-              className={`px-2 py-0.5 text-[10px] font-bold ${
-                activeView === 'FIELDS' ? 'bg-blue-900 text-white' : 'bg-white text-slate-700 hover:bg-slate-100'
-              }`}
-            >
-              Extracted Data
-            </button>
-            <button
-              onClick={() => setActiveView('OCR_TEXT')}
-              className={`px-2 py-0.5 text-[10px] font-bold ${
-                activeView === 'OCR_TEXT' ? 'bg-blue-900 text-white' : 'bg-white text-slate-700 hover:bg-slate-100'
-              }`}
-            >
-              Raw OCR
-            </button>
-          </div>
+          {/* Toggle between fields and raw OCR (Officer Scrutiny Only - Part 19) */}
+          {isOfficerMode && (
+            <div className="flex border border-slate-300 rounded overflow-hidden">
+              <button
+                onClick={() => setActiveView('FIELDS')}
+                className={`px-2 py-0.5 text-[10px] font-bold ${
+                  activeView === 'FIELDS' ? 'bg-blue-900 text-white' : 'bg-white text-slate-700 hover:bg-slate-100'
+                }`}
+              >
+                Extracted Data
+              </button>
+              <button
+                onClick={() => setActiveView('OCR_TEXT')}
+                className={`px-2 py-0.5 text-[10px] font-bold ${
+                  activeView === 'OCR_TEXT' ? 'bg-blue-900 text-white' : 'bg-white text-slate-700 hover:bg-slate-100'
+                }`}
+              >
+                Raw OCR
+              </button>
+            </div>
+          )}
         </div>
       </div>
 

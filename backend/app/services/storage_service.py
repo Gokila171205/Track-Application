@@ -82,10 +82,24 @@ class LocalStorageService:
         if not target_path.exists() or not target_path.is_file():
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail="Document file binary could not be found in storage."
+                detail="Document file is no longer available."
             )
 
         return target_path
+
+    def file_exists(self, storage_key: Optional[str]) -> bool:
+        """
+        Safely check whether the physical file exists on disk without raising exceptions.
+        """
+        if not storage_key:
+            return False
+        try:
+            target_path = (self.base_dir / storage_key).resolve()
+            base_resolved = self.base_dir.resolve()
+            target_path.relative_to(base_resolved)
+            return target_path.exists() and target_path.is_file()
+        except Exception:
+            return False
 
     async def delete_file(self, storage_key: str) -> bool:
         try:

@@ -1,22 +1,50 @@
 import React, { useState, useEffect } from 'react';
 import { useApp } from '../../context/AppContext';
 import { StatusTimeline } from '../../components/applicant/StatusTimeline';
-import { History, Upload, FileText, AlertCircle } from 'lucide-react';
-import { Link } from 'react-router-dom';
+import { ApplicationCard } from '../../components/applicant/ApplicationCard';
+import { History, Upload, FileText, AlertCircle, Building, CheckCircle2 } from 'lucide-react';
+import { Link, useSearchParams } from 'react-router-dom';
 
 export const StatusTrackerPage: React.FC = () => {
-  const { applications, currentApplicantApplication, resolveApplicationDeficiency, isLoadingApplications } = useApp();
+  const { applications, resolveApplicationDeficiency, isLoadingApplications, fetchApplications } = useApp();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const urlAppId = searchParams.get('applicationId') || searchParams.get('appId');
+
   const [searchId, setSearchId] = useState<string>('');
-  const [selectedApp, setSelectedApp] = useState(currentApplicantApplication || applications[0] || null);
+  const [selectedApp, setSelectedApp] = useState(
+    (urlAppId ? applications.find(a => a.id.toLowerCase() === urlAppId.toLowerCase()) : null) || applications[0] || null
+  );
   const [isResolveModalOpen, setIsResolveModalOpen] = useState<boolean>(false);
   const [replacementFile, setReplacementFile] = useState<string>('Income_Certificate_Tehsildar_FY2024-25_Renewed.pdf');
   const [replacementFileObj, setReplacementFileObj] = useState<File | null>(null);
 
   useEffect(() => {
-    if (!selectedApp && (currentApplicantApplication || applications.length > 0)) {
-      setSelectedApp(currentApplicantApplication || applications[0]);
+    fetchApplications();
+    const timer = setInterval(() => {
+      fetchApplications();
+    }, 8000);
+    return () => clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    if (urlAppId && applications.length > 0) {
+      const match = applications.find(a => a.id.toLowerCase() === urlAppId.toLowerCase());
+      if (match) {
+        setSelectedApp(match);
+        return;
+      }
     }
-  }, [currentApplicantApplication, applications]);
+    if (selectedApp) {
+      const updated = applications.find(a => a.id === selectedApp.id);
+      if (updated) {
+        setSelectedApp(updated);
+        return;
+      }
+    }
+    if (applications.length > 0) {
+      setSelectedApp(applications[0]);
+    }
+  }, [applications, urlAppId]);
 
   const handleSearch = (e: React.FormEvent) => {
     e.preventDefault();
@@ -26,6 +54,7 @@ export const StatusTrackerPage: React.FC = () => {
       );
       if (match) {
         setSelectedApp(match);
+        setSearchParams({ applicationId: match.id });
       } else {
         alert(`No application matching "${searchId}" found in your registered dossiers.`);
       }
@@ -106,29 +135,43 @@ export const StatusTrackerPage: React.FC = () => {
         )}
       </div>
 
-      {/* If applicant has multiple applications, allow selecting among their own */}
-      {applications.length > 1 && (
-        <div className="bg-slate-100 p-3 rounded border border-slate-300 flex items-center justify-between gap-2 text-xs overflow-x-auto">
-          <span className="font-bold text-slate-700 whitespace-nowrap">
-            Your Applications:
-          </span>
-          <div className="flex items-center gap-2">
-            {applications.map((app) => (
-              <button
-                key={app.id}
-                onClick={() => setSelectedApp(app)}
-                className={`px-2.5 py-1 rounded text-[11px] font-semibold transition-colors whitespace-nowrap ${
-                  selectedApp.id === app.id
-                    ? 'bg-blue-900 text-white shadow'
-                    : 'bg-white border border-slate-300 text-slate-700 hover:bg-slate-200'
-                }`}
-              >
-                {app.id} ({app.status.replace(/_/g, ' ')})
-              </button>
-            ))}
+      {/* MULTI-APPLICATION INDEPENDENT TRACKING OVERVIEW */}
+      <div className="space-y-3">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-200 pb-2">
+          <div>
+            <h2 className="text-sm font-black text-[#0b2853] uppercase tracking-wider flex items-center gap-2">
+              <Building className="w-4 h-4 text-blue-800" />
+              <span>Registered Applications ({applications.length})</span>
+            </h2>
+            <p className="text-xs text-slate-500">
+              Each scholarship application maintains its own independent status and verification lifecycle.
+            </p>
           </div>
+          <span className="text-xs font-mono font-bold text-slate-600">
+            Selected: <strong className="text-blue-900">{selectedApp.id}</strong> ({selectedApp.status})
+          </span>
         </div>
-      )}
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          {applications.map((application) => (
+            <ApplicationCard
+              key={application.id}
+              application={application}
+              status={application.status}
+              isSelected={selectedApp.id === application.id}
+              onSelect={(app) => {
+                setSelectedApp(app);
+                setSearchParams({ applicationId: app.id });
+              }}
+              onRectifyDeficiency={(app) => {
+                setSelectedApp(app);
+                setIsResolveModalOpen(true);
+              }}
+            />
+          ))}
+        </div>
+      </div>
+
 
       {/* 8-Stage Timeline */}
       <StatusTimeline

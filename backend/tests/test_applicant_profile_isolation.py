@@ -146,7 +146,39 @@ def test_applicant_profile_isolation():
         print(f"  [OK] Application created: ID={app_id_a}")
 
         print("\n[PHASE 2.3] Applicant A uploads a statutory document...")
-        dummy_pdf = io.BytesIO(b"%PDF-1.4 Mock ST Certificate Content for Applicant Alpha")
+        cert_text = (
+            "GOVERNMENT OF ODISHA\n"
+            "OFFICE OF THE TAHSILDAR, BARIPADA, MAYURBHANJ\n"
+            "SCHEDULED TRIBE CERTIFICATE\n"
+            "Certificate No: OD/ST/2026/099\n"
+            "This is to certify that Applicant Alpha son of Father Alpha of Mayurbhanj "
+            "belongs to Santhal Community recognized as Scheduled Tribe."
+        )
+        import pypdf
+        writer = pypdf.PdfWriter()
+        writer.add_blank_page(width=612, height=792)
+        writer.add_metadata({"/Producer": "Government of Odisha", "/Title": "Certificate", "/Subject": cert_text})
+        page = writer.pages[0]
+        stream_ops = "BT /F1 12 Tf 50 720 Td 14 TL "
+        for line in cert_text.split("\n"):
+            stream_ops += f"({line}) ' "
+        stream_ops += "ET"
+        cs = pypdf.generic.DecodedStreamObject()
+        cs.set_data(stream_ops.encode("latin-1", errors="replace"))
+        page[pypdf.generic.NameObject("/Contents")] = cs
+        font_dict = pypdf.generic.DictionaryObject({
+            pypdf.generic.NameObject("/Type"): pypdf.generic.NameObject("/Font"),
+            pypdf.generic.NameObject("/Subtype"): pypdf.generic.NameObject("/Type1"),
+            pypdf.generic.NameObject("/BaseFont"): pypdf.generic.NameObject("/Helvetica"),
+        })
+        page[pypdf.generic.NameObject("/Resources")] = pypdf.generic.DictionaryObject({
+            pypdf.generic.NameObject("/Font"): pypdf.generic.DictionaryObject({pypdf.generic.NameObject("/F1"): font_dict})
+        })
+        pdf_out = io.BytesIO()
+        writer.write(pdf_out)
+        pdf_bytes = pdf_out.getvalue()
+
+        dummy_pdf = io.BytesIO(pdf_bytes)
         upload_res = client.post(
             "/api/documents/upload",
             headers=headers_a,

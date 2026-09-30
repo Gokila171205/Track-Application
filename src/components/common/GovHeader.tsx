@@ -3,6 +3,7 @@ import { useApp } from '../../context/AppContext';
 import { useAuth } from '../../context/AuthContext';
 import { Search, User, LogIn, UserPlus, LogOut, LayoutDashboard, Bell, X, CheckCircle2, Grid, Compass, ChevronDown, RotateCcw, Volume2, VolumeX } from 'lucide-react';
 import { Link, useNavigate } from 'react-router-dom';
+import { handleSkipToMainContent } from '../../utils/skipLink';
 
 export const GovHeader: React.FC = () => {
   const {
@@ -126,7 +127,13 @@ export const GovHeader: React.FC = () => {
             {/* Screen Reader Access link */}
             <a
               href="#main-content"
-              className="text-blue-800 hover:underline hidden md:inline focus:ring-2 focus:ring-blue-600 px-1 font-medium"
+              onClick={handleSkipToMainContent}
+              onKeyDown={(e) => {
+                if (e.key === ' ' || e.key === 'Enter') {
+                  handleSkipToMainContent(e);
+                }
+              }}
+              className="text-blue-800 hover:underline focus:outline-none focus:ring-2 focus:ring-blue-600 focus:ring-offset-1 focus:bg-white focus:text-blue-900 focus:shadow-sm px-1.5 py-0.5 rounded font-medium inline-block text-xs"
             >
               Skip to Main Content
             </a>

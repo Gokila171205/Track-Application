@@ -17,7 +17,7 @@ Unified AI-enabled scholarship and fellowship portal for the Ministry of Tribal 
 - Node.js 18 or newer
 - Python 3.10 or newer
 - npm
-- MongoDB is optional for local development because the backend can use `mongomock-motor`
+- MongoDB Atlas or MongoDB local instance with `tsfms` database
 
 ## Frontend Setup
 
@@ -69,11 +69,9 @@ Backend URLs:
 - Health check: `http://127.0.0.1:8000/api/health`
 - Swagger documentation: `http://127.0.0.1:8000/docs`
 
-## Local Database Fallback
-
-If MongoDB is not running, the backend automatically uses the in-memory fallback provided by `mongomock-motor`. Demo schemes, users, and applications are seeded when the service starts. The in-memory data is reset when the backend restarts.
-
-For persistent data, run MongoDB and set `MONGO_URI` in `backend/.env` to the appropriate local or hosted connection string.
+## Database Configuration
+ 
+The backend connects to MongoDB Atlas using `MONGO_URI` configured in `backend/.env`. All registration, applicant profiles, and application data persist directly in MongoDB Atlas under the `tsfms` database. In-memory and mock fallbacks are completely disabled to guarantee true persistence.
 
 ## Application Flow
 

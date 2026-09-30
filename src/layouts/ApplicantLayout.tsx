@@ -13,17 +13,19 @@ import {
   AlertTriangle,
   User,
   ShieldCheck,
-  ArrowLeft
+  ArrowLeft,
+  Layers
 } from 'lucide-react';
 
 export const ApplicantLayout: React.FC = () => {
-  const { currentUser, currentApplicantApplication } = useApp();
+  const { currentUser, applications } = useApp();
   const location = useLocation();
   const navigate = useNavigate();
 
-  const app = currentApplicantApplication;
+  const deficientApp = applications.find(a => a.hasDeficiency);
 
   const navItems = [
+    { to: '/schemes', label: 'Scheme Discovery', icon: <Layers className="w-4 h-4 text-amber-600" /> },
     { to: '/applicant/dashboard', label: 'Dashboard', icon: <LayoutDashboard className="w-4 h-4" /> },
     { to: '/applicant/apply', label: 'Apply for Scheme', icon: <FilePlus className="w-4 h-4" /> },
     { to: '/applicant/status', label: 'Application Status', icon: <Clock className="w-4 h-4" /> },
@@ -56,10 +58,9 @@ export const ApplicantLayout: React.FC = () => {
                   </span>
                 </div>
                 <div className="text-[11px] text-slate-300 flex flex-wrap items-center gap-3 mt-0.5">
-                  {app ? (
+                  {applications.length > 0 ? (
                     <>
-                      <span>Application: <strong>{app.id}</strong></span>
-                      <span>Scheme: <strong>{app.schemeCode}</strong></span>
+                      <span>Active Applications: <strong>{applications.length}</strong></span>
                       <span className="text-emerald-400 flex items-center gap-1 font-semibold">
                         <ShieldCheck className="w-3 h-3" /> DBT Aadhaar Seeded
                       </span>
@@ -72,13 +73,13 @@ export const ApplicantLayout: React.FC = () => {
             </div>
 
             {/* Deficiency Alert Indicator if applicable */}
-            {app?.hasDeficiency && (
+            {deficientApp && (
               <Link
-                to="/applicant/status"
+                to={`/applicant/status?applicationId=${deficientApp.id}`}
                 className="bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold px-3 py-1.5 rounded flex items-center gap-2 shadow animate-bounce"
               >
                 <AlertTriangle className="w-4 h-4 text-amber-300" />
-                <span>DEFICIENCY DETECTED • ACTION REQUIRED</span>
+                <span>DEFICIENCY DETECTED ON {deficientApp.id} • ACTION REQUIRED</span>
               </Link>
             )}
           </div>
@@ -119,7 +120,11 @@ export const ApplicantLayout: React.FC = () => {
       </div>
 
       {/* Main Applicant Content */}
-      <main className="flex-1 max-w-7xl mx-auto px-4 py-6 w-full">
+      <main
+        id="main-content"
+        tabIndex={-1}
+        className="flex-1 max-w-7xl mx-auto px-4 py-6 w-full scroll-mt-20 focus:outline-none"
+      >
         <Outlet />
       </main>
 

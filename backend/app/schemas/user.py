@@ -11,7 +11,7 @@ class UserRole(str, Enum):
 class UserRegister(BaseModel):
     name: str = Field(..., min_length=2, max_length=100, example="Sunita Soren")
     email: EmailStr = Field(..., example="sunita.soren@research.du.ac.in")
-    phone: str = Field(..., min_length=10, max_length=15, example="9845120394")
+    phone: str = Field(default="", example="9845120394")
     password: str = Field(..., min_length=6, max_length=128, example="SecurePass@2026")
     role: Optional[UserRole] = Field(default=UserRole.APPLICANT)
 

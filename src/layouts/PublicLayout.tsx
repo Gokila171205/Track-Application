@@ -20,7 +20,11 @@ export const PublicLayout: React.FC = () => {
       <NewsTicker />
 
       {/* Main Page Area */}
-      <main id="main-content" className="flex-1 focus:outline-none">
+      <main
+        id="main-content"
+        tabIndex={-1}
+        className="flex-1 scroll-mt-20 focus:outline-none"
+      >
         <Outlet />
       </main>
 

@@ -18,7 +18,11 @@ class ApplicationStatus(str, Enum):
 # Canonical lifecycle transition rules
 ALLOWED_STATUS_TRANSITIONS: Dict[ApplicationStatus, List[ApplicationStatus]] = {
     ApplicationStatus.DRAFT: [ApplicationStatus.SUBMITTED],
-    ApplicationStatus.SUBMITTED: [ApplicationStatus.DOCUMENT_VERIFICATION],
+    ApplicationStatus.SUBMITTED: [
+        ApplicationStatus.DOCUMENT_VERIFICATION,
+        ApplicationStatus.DEFICIENT,
+        ApplicationStatus.REJECTED,
+    ],
     ApplicationStatus.DOCUMENT_VERIFICATION: [
         ApplicationStatus.ELIGIBILITY_VERIFICATION,
         ApplicationStatus.DEFICIENT,
@@ -34,11 +38,27 @@ ALLOWED_STATUS_TRANSITIONS: Dict[ApplicationStatus, List[ApplicationStatus]] = {
         ApplicationStatus.DEFICIENT,
         ApplicationStatus.REJECTED,
     ],
-    ApplicationStatus.DEFICIENT: [ApplicationStatus.RESUBMITTED],
-    ApplicationStatus.RESUBMITTED: [ApplicationStatus.DOCUMENT_VERIFICATION],
+    ApplicationStatus.DEFICIENT: [
+        ApplicationStatus.RESUBMITTED,
+        ApplicationStatus.DOCUMENT_VERIFICATION,
+        ApplicationStatus.REJECTED,
+    ],
+    ApplicationStatus.RESUBMITTED: [
+        ApplicationStatus.DOCUMENT_VERIFICATION,
+        ApplicationStatus.DEFICIENT,
+        ApplicationStatus.REJECTED,
+    ],
     ApplicationStatus.SELECTION: [ApplicationStatus.APPROVED, ApplicationStatus.REJECTED],
-    ApplicationStatus.APPROVED: [],
-    ApplicationStatus.REJECTED: [],
+    ApplicationStatus.APPROVED: [
+        ApplicationStatus.SELECTION,
+        ApplicationStatus.SCRUTINY,
+    ],
+    ApplicationStatus.REJECTED: [
+        ApplicationStatus.RESUBMITTED,
+        ApplicationStatus.SUBMITTED,
+        ApplicationStatus.DOCUMENT_VERIFICATION,
+        ApplicationStatus.SCRUTINY,
+    ],
 }
 
 class PersonalDetails(BaseModel):
@@ -113,16 +133,24 @@ class FinancialDetailsDraft(BaseModel):
 
 class ApplicationDocumentItem(BaseModel):
     id: str
-    document_code: str
-    document_name: str
-    file_name: str
+    document_code: Optional[str] = "DOCUMENT"
+    document_name: Optional[str] = "Uploaded Document"
+    file_name: Optional[str] = "document.pdf"
     file_url: Optional[str] = None
     file_size_kb: Optional[int] = None
     status: str = "PENDING"
+    verification_status: Optional[str] = None
+    file_exists: Optional[bool] = True
+    rejection_reason: Optional[str] = None
+    verified_by: Optional[str] = None
+    verified_at: Optional[datetime] = None
+    rejected_by: Optional[str] = None
+    rejected_at: Optional[datetime] = None
     uploaded_at: datetime = Field(default_factory=datetime.utcnow)
 
 class ApplicationCreate(BaseModel):
     scheme_id: str
+    applicant_id: Optional[str] = None
     personal_details: PersonalDetails
     academic_details: AcademicDetails
     financial_details: FinancialDetails
@@ -132,6 +160,7 @@ class ApplicationCreate(BaseModel):
 
 class ApplicationDraftSave(BaseModel):
     application_id: Optional[str] = None
+    applicant_id: Optional[str] = None
     scheme_id: str
     current_step: int = 1
     personal_details: Optional[PersonalDetailsDraft] = None
@@ -150,6 +179,8 @@ class ApplicationUpdate(BaseModel):
 class ApplicationResponse(BaseModel):
     application_id: str
     user_id: str
+    applicant_id: Optional[str] = None
+    applicant_snapshot: Optional[Dict[str, Any]] = None
     scheme_id: str
     scheme_name: Optional[str] = None
     status: ApplicationStatus
@@ -159,10 +190,19 @@ class ApplicationResponse(BaseModel):
     financial_details: Optional[FinancialDetailsDraft] = Field(default_factory=FinancialDetailsDraft)
     documents: List[ApplicationDocumentItem] = []
     has_deficiency: bool = False
+    deficiency_category: Optional[str] = None
+    deficiency_reason: Optional[str] = None
+    deficiency_required_correction: Optional[str] = None
     deficiency_notes: Optional[str] = None
     officer_remarks: Optional[str] = None
+    rejection_reason: Optional[str] = None
+    audit_trail: Optional[List[Dict[str, Any]]] = None
     created_at: datetime
     updated_at: datetime
 
     class Config:
         from_attributes = True
+
+class ApplicantTrackingResponse(BaseModel):
+    applicant_id: Optional[str] = None
+    applications: List[ApplicationResponse]

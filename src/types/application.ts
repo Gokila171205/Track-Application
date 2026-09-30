@@ -13,6 +13,7 @@ export type ApplicationStatus =
 
 export interface ApplicantProfile {
   id: string;
+  applicantId?: string;
   fullName: string;
   fatherOrHusbandName: string;
   gender: 'MALE' | 'FEMALE' | 'TRANSGENDER';
@@ -25,6 +26,8 @@ export interface ApplicantProfile {
   state: string;
   district: string;
   pincode: string;
+  address?: string;
+  addressLine?: string;
   disabilityStatus: 'NONE' | 'YES';
   disabilityPercentage?: number;
 }
@@ -61,8 +64,13 @@ export interface ApplicationDocument {
   fileSizeKB: number;
   uploadedAt: string;
   ocrExtracted: boolean;
-  status: 'PENDING' | 'VALID' | 'DEFICIENT';
+  status: 'PENDING' | 'VALID' | 'VERIFIED' | 'REJECTED' | 'DEFICIENT' | string;
+  verificationStatus?: 'PENDING' | 'VERIFIED' | 'REJECTED' | 'REQUIRES_REUPLOAD' | 'MANUAL_REVIEW' | string;
+  fileExists?: boolean;
+  rejectionReason?: string;
   deficiencyReason?: string;
+  verifiedBy?: string;
+  verifiedAt?: string;
 }
 
 export interface AuditRecord {
@@ -77,7 +85,9 @@ export interface AuditRecord {
 }
 
 export interface ApplicationRecord {
-  id: string; // e.g. "MOTA/2026/NF/10492"
+  id: string; // e.g. "APP-2026-000001"
+  applicantId?: string; // Permanent e.g. "ST-2026-000123"
+  applicantSnapshot?: any; // Preserved historical snapshot
   schemeId: string;
   schemeCode: string;
   schemeName: string;
@@ -92,7 +102,11 @@ export interface ApplicationRecord {
   annualFamilyIncome: number;
   documents: ApplicationDocument[];
   hasDeficiency: boolean;
+  deficiencyCategory?: string;
+  deficiencyReason?: string;
+  deficiencyRequiredCorrection?: string;
   deficiencyNotes?: string;
+  rejectionReason?: string;
   aiEligibilityResult?: {
     overallStatus: 'ELIGIBLE' | 'NOT_ELIGIBLE' | 'FLAGGED_DEFICIENCY' | 'MORE_INFO_REQUIRED';
     confidenceScore: number;

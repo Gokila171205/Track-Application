@@ -103,19 +103,29 @@ def extract_text_from_image(file_bytes: bytes) -> str:
 def extract_non_sensitive_fields(text: str, doc_type: str) -> Dict[str, Optional[str]]:
     """
     Extract benign administrative fields (certificate number, issuing authority,
-    financial year, date) without logging or exposing sensitive PII.
+    financial year, date, income) without logging or exposing sensitive PII.
     """
     fields: Dict[str, Optional[str]] = {
         "certificate_number": None,
         "issuing_authority": None,
         "financial_year": None,
         "issue_date": None,
+        "annual_income": None,
     }
 
     # Certificate Number regex
-    cert_match = re.search(r"(?:cert(?:ificate)?|ref|sl|application)\s*(?:no|number|num)?[:.\s]+([A-Z0-9/\-_]{4,35})", text, re.IGNORECASE)
-    if cert_match:
+    cert_match = re.search(
+        r"(?:cert(?:ificate)?\s*(?:no|number|num|id)|ref\s*(?:no|number|num)|sl\s*(?:no|number|num)|application\s*(?:no|number|num))\s*[:.\s-]+([A-Z0-9/\-_]{4,35})",
+        text,
+        re.IGNORECASE
+    )
+    if cert_match and not any(stop in cert_match.group(1).lower() for stop in ["type", "testing", "format", "category"]):
         fields["certificate_number"] = cert_match.group(1).strip()
+    else:
+        # Fallback to standard government format ID
+        fallback_cert = re.search(r"\b([A-Z]{2,6}[-_][A-Z0-9/\-_]{6,30})\b", text)
+        if fallback_cert and not any(stop in fallback_cert.group(1).lower() for stop in ["income", "certificate", "testing"]):
+            fields["certificate_number"] = fallback_cert.group(1).strip()
 
     # Issuing Authority regex
     authorities = [
@@ -126,24 +136,47 @@ def extract_non_sensitive_fields(text: str, doc_type: str) -> Dict[str, Optional
         "District Magistrate",
         "Deputy Commissioner",
         "Revenue Department",
+        "Competent Revenue Authority",
+        "Tehsildar",
         "Board of Secondary Education",
         "State Bank of India",
         "Office of the Headmaster",
     ]
     for auth in authorities:
-        if re.search(re.escape(auth), text, re.IGNORECASE):
+        if re.search(r"\b" + re.escape(auth) + r"\b", text, re.IGNORECASE):
             fields["issuing_authority"] = auth
             break
 
     # Financial Year regex
-    fy_match = re.search(r"\b(?:FY|Financial\s+Year|AY)\s*[:.\s]*((?:20\d\d[-/]\d\d)|(?:20\d\d[-/]\d\d\d\d))\b", text, re.IGNORECASE)
+    fy_match = re.search(
+        r"\b(?:financial\s*year|fy|ay|assessment\s*year)\s*[:.\s-]*((?:20\d\d)\s*[-/]\s*(?:\d{2,4}))\b",
+        text,
+        re.IGNORECASE
+    )
     if fy_match:
-        fields["financial_year"] = fy_match.group(1).strip()
+        fields["financial_year"] = fy_match.group(1).replace(" ", "").strip()
 
-    # Issue Date regex
-    date_match = re.search(r"\b([0-3]?[0-9][-/][0-1]?[0-9][-/]20\d\d)\b", text)
+    # Annual Family Income regex (for income certificates)
+    income_match = re.search(
+        r"(?:annual\s*(?:family\s*)?income|gross\s*(?:annual\s*)?income|total\s*(?:annual\s*)?income)\s*[:.\s-]*(?:inr|rs\.?|₹)?\s*([0-9,]+(?:\.\d{2})?)",
+        text,
+        re.IGNORECASE
+    )
+    if income_match:
+        fields["annual_income"] = income_match.group(1).replace(",", "").strip()
+
+    # Issue Date regex (numeric or written month)
+    date_match = re.search(
+        r"(?:issue\s*date|date\s*of\s*issue|issued\s*on)\s*[:.\s-]+([0-3]?[0-9][-/][0-1]?[0-9][-/]20\d\d|[0-3]?\d(?:st|nd|rd|th)?\s+[a-zA-Z]+\s*,?\s*20\d\d)",
+        text,
+        re.IGNORECASE
+    )
     if date_match:
         fields["issue_date"] = date_match.group(1).strip()
+    else:
+        raw_date = re.search(r"\b([0-3]?[0-9][-/][0-1]?[0-9][-/]20\d\d)\b", text)
+        if raw_date:
+            fields["issue_date"] = raw_date.group(1).strip()
 
     return fields
 

@@ -6,8 +6,8 @@ export interface SystemAuditLog {
   action: string;
   applicationId: string;
   schemeCode: string;
-  previousStatus: string;
-  newStatus: string;
+  previousStatus?: string;
+  newStatus?: string;
   reason: string;
   remarks?: string;
   ipAddress: string;

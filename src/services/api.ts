@@ -4,6 +4,8 @@
  * Note: MongoDB credentials must NEVER be stored or exposed in this frontend layer.
  */
 
+import { ExplainableIssue, ValidationSummaryResult } from '../types/explainableValidation';
+
 const DEFAULT_API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000/api';
 
 class ApiClient {
@@ -86,10 +88,18 @@ class ApiClient {
 
     if (!response.ok) {
       let errorMessage = `API request failed with status ${response.status}`;
+      let parsedDetail: any = null;
       try {
         const errorData = await response.json();
         if (errorData.detail) {
-          errorMessage = typeof errorData.detail === 'string' ? errorData.detail : JSON.stringify(errorData.detail);
+          parsedDetail = errorData.detail;
+          if (typeof errorData.detail === 'string') {
+            errorMessage = errorData.detail;
+          } else if (errorData.detail.message) {
+            errorMessage = errorData.detail.message;
+          } else {
+            errorMessage = JSON.stringify(errorData.detail);
+          }
         }
       } catch (_) {
         if (response.status === 401) {
@@ -106,6 +116,7 @@ class ApiClient {
       }
       const error: any = new Error(errorMessage);
       error.status = response.status;
+      error.detail = parsedDetail;
       throw error;
     }
 
@@ -175,9 +186,10 @@ class ApiClient {
     });
   }
 
-  public async getReusableDocuments() {
+  public async getReusableDocuments(schemeId?: string) {
     try {
-      const res = await this.request<any[]>('/applicant/reusable-documents');
+      const url = schemeId ? `/applicant/reusable-documents?scheme_id=${encodeURIComponent(schemeId)}` : '/applicant/reusable-documents';
+      const res = await this.request<any[]>(url);
       return Array.isArray(res) ? res : [];
     } catch (err: any) {
       if (err?.status === 404 || err?.message?.includes('404')) {
@@ -234,6 +246,20 @@ class ApiClient {
     return this.request<any[]>('/applications/my');
   }
 
+  public async getApplicantTracking() {
+    return this.request<{ applicant_id: string; applications: any[] }>('/applications/tracking');
+  }
+
+  public async getApplicantNotifications() {
+    return this.request<any[]>('/applications/notifications');
+  }
+
+  public async markNotificationRead(id: string) {
+    return this.request<any>(`/applications/notifications/${id}/read`, {
+      method: 'PATCH'
+    });
+  }
+
   public async getApplicationById(id: string) {
     return this.request<any>(`/applications/${id}`);
   }
@@ -245,24 +271,71 @@ class ApiClient {
     });
   }
 
+  // Real-time explainable availability and duplicate check
+  public async checkAvailability(email?: string, phone?: string): Promise<{
+    available: boolean;
+    issue?: ExplainableIssue | null;
+  }> {
+    return this.request<{ available: boolean; issue?: ExplainableIssue | null }>('/auth/check-availability', {
+      method: 'POST',
+      body: JSON.stringify({ email, phone }),
+    });
+  }
+
+  // Complete application dossier explainable validation
+  public async validateApplicationDossier(payload: {
+    scheme_id: string;
+    personal_details?: any;
+    academic_details?: any;
+    financial_details?: any;
+    bank_details?: any;
+    documents?: any[];
+  }): Promise<ValidationSummaryResult> {
+    return this.request<ValidationSummaryResult>('/applications/validate', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
   // Documents
-  public async verifyDocumentType(file: File, requiredType: string, applicationId?: string): Promise<{
+  public async verifyDocumentType(
+    file: File,
+    requiredType: string,
+    options?: {
+      applicationId?: string;
+      applicantName?: string;
+      applicantDob?: string;
+      applicantAadhaar?: string;
+    } | string
+  ): Promise<{
     success: boolean;
     required_document_type: string;
     detected_document_type?: string;
-    match_status: 'TYPE_MATCH' | 'TYPE_MISMATCH' | 'MANUAL_REVIEW' | 'LOW_QUALITY';
+    match_status: 'TYPE_MATCH' | 'TYPE_MISMATCH' | 'MANUAL_REVIEW' | 'LOW_QUALITY' | string;
     confidence: number;
     message: string;
     is_acceptable: boolean;
     character_count: number;
     detected_keywords: string[];
     extracted_fields: Record<string, string | null>;
+    explainable_issue?: ExplainableIssue;
   }> {
     const formData = new FormData();
     formData.append('file', file);
     formData.append('required_document_type', requiredType);
-    if (applicationId) {
-      formData.append('application_id', applicationId);
+
+    const opts = typeof options === 'string' ? { applicationId: options } : options || {};
+    if (opts.applicationId) {
+      formData.append('application_id', opts.applicationId);
+    }
+    if (opts.applicantName) {
+      formData.append('applicant_name', opts.applicantName);
+    }
+    if (opts.applicantDob) {
+      formData.append('applicant_dob', opts.applicantDob);
+    }
+    if (opts.applicantAadhaar) {
+      formData.append('applicant_aadhaar', opts.applicantAadhaar);
     }
 
     const token = this.getToken();
@@ -357,27 +430,48 @@ class ApiClient {
     return this.request<any>(`/documents/${encodeURIComponent(documentId)}`);
   }
 
-  public async downloadDocumentFile(documentId: string): Promise<Blob> {
+  public async downloadDocumentFile(documentId: string, asDownload: boolean = true): Promise<Blob> {
     const token = this.getToken();
     const headers: Record<string, string> = {};
     if (token) {
       headers['Authorization'] = `Bearer ${token}`;
     }
 
-    const response = await this.fetchWithFallback(`/documents/${encodeURIComponent(documentId)}/file`, {
+    const endpoint = asDownload
+      ? `/documents/${encodeURIComponent(documentId)}/download`
+      : `/documents/${encodeURIComponent(documentId)}/file`;
+
+    const response = await this.fetchWithFallback(endpoint, {
       headers,
     });
 
     if (!response.ok) {
-      let errorMsg = `File download failed: ${response.statusText}`;
-      try {
-        const errJson = await response.json();
-        if (errJson.detail) errorMsg = errJson.detail;
-      } catch (_) {}
+      let errorMsg = `Unable to download the document. Please try again.`;
+      if (response.status === 401) {
+        errorMsg = 'Session expired. Please log in again.';
+      } else if (response.status === 403) {
+        errorMsg = 'You are not authorized to access this document.';
+      } else if (response.status === 404) {
+        errorMsg = 'Document file is unavailable.';
+      } else {
+        try {
+          const errJson = await response.json();
+          if (errJson.detail) {
+            errorMsg = typeof errJson.detail === 'string' ? errJson.detail : JSON.stringify(errJson.detail);
+          }
+        } catch (_) {}
+      }
       throw new Error(errorMsg);
     }
 
     return response.blob();
+  }
+
+  public async verifyDocument(documentId: string, status: 'VERIFIED' | 'REJECTED', reason?: string) {
+    return this.request<any>(`/documents/${encodeURIComponent(documentId)}/verify-status`, {
+      method: 'PUT',
+      body: JSON.stringify({ status, reason }),
+    });
   }
 
   // Grievances
@@ -409,7 +503,7 @@ class ApiClient {
     return this.request<any[]>(`/admin/applications${query}`);
   }
 
-  public async updateApplicationStatusOfficer(applicationId: string, payload: { status: string; remarks?: string; officer_name?: string }) {
+  public async updateApplicationStatusOfficer(applicationId: string, payload: { status: string; remarks?: string; officer_name?: string; category?: string; required_correction?: string }) {
     return this.request<any>(`/admin/applications/${applicationId}/status`, {
       method: 'PUT',
       body: JSON.stringify(payload),

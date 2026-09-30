@@ -61,6 +61,9 @@ export const AppRoutes: React.FC = () => {
         <Route path="/forgot-password" element={<ForgotPasswordPage />} />
         <Route path="/unauthorized" element={<UnauthorizedPage />} />
 
+        {/* Top-level /dashboard safe access redirect */}
+        <Route path="/dashboard" element={<Navigate to="/applicant/dashboard" replace />} />
+
         {/* Redirect Legacy Auth Paths */}
         <Route path="/applicant/login" element={<Navigate to="/login" replace />} />
         <Route path="/applicant/register" element={<Navigate to="/signup" replace />} />
@@ -70,7 +73,7 @@ export const AppRoutes: React.FC = () => {
       <Route element={<ProtectedRoute />}>
         <Route element={<RoleRoute allowedRoles={['APPLICANT']} />}>
           <Route path="/applicant" element={<ApplicantLayout />}>
-            <Route index element={<Navigate to="dashboard" replace />} />
+            <Route index element={<Navigate to="/schemes" replace />} />
             <Route path="dashboard" element={<ApplicantDashboardPage />} />
             <Route path="apply" element={<ApplicationWizardPage />} />
             <Route path="status" element={<StatusTrackerPage />} />

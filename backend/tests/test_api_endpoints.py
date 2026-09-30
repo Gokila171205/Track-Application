@@ -1,6 +1,7 @@
 import json
 import urllib.request
 import urllib.error
+import time
 
 BASE_URL = "http://127.0.0.1:8000/api"
 
@@ -37,11 +38,15 @@ def run_tests():
 
     # 2. Registration
     print("\n--- 7. Testing Registration ---")
+    unique_suffix = int(time.time()) % 100000
+    test_email = f"sunil.soren.{unique_suffix}@gov.in"
+    test_phone = f"95{unique_suffix:08d}"
+    test_pwd = "SecurePassword@123"
     reg_payload = {
         "name": "Sunil Soren",
-        "email": "sunil.soren.test@gov.in",
-        "phone": "9876543210",
-        "password": "SecurePassword@123"
+        "email": test_email,
+        "phone": test_phone,
+        "password": test_pwd
     }
     try:
         reg_res = make_request("/auth/register", method="POST", data=reg_payload)
@@ -51,8 +56,8 @@ def run_tests():
         if e.code in (400, 409):
             print("User already exists from previous run, proceeding to login...")
             login_payload = {
-                "email": "sunil.soren.test@gov.in",
-                "password": "SecurePassword@123"
+                "email": test_email,
+                "password": test_pwd
             }
             login_res = make_request("/auth/login", method="POST", data=login_payload)
             token = login_res["access_token"]
@@ -62,8 +67,8 @@ def run_tests():
     # 3. Login
     print("\n--- 8. Testing Login and /auth/me ---")
     login_payload = {
-        "email": "sunil.soren.test@gov.in",
-        "password": "SecurePassword@123"
+        "email": test_email,
+        "password": test_pwd
     }
     login_res = make_request("/auth/login", method="POST", data=login_payload)
     token = login_res["access_token"]

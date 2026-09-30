@@ -2,6 +2,7 @@ import React from 'react';
 import { SchemeConfig } from '../../types/scheme';
 import { getSchemeWindowStatus } from '../../utils/schemeWindow';
 import { useApp } from '../../context/AppContext';
+import { useAuth } from '../../context/AuthContext';
 import { getHindiScheme } from '../../data/translations/hi';
 import { Link } from 'react-router-dom';
 import {
@@ -14,7 +15,8 @@ import {
   CheckCircle,
   ArrowRight,
   Sparkles,
-  FileCheck2
+  FileCheck2,
+  FileText
 } from 'lucide-react';
 
 interface SchemeCardProps {
@@ -23,9 +25,20 @@ interface SchemeCardProps {
 }
 
 export const SchemeCard: React.FC<SchemeCardProps> = ({ scheme, onOpenPreCheck }) => {
-  const { language } = useApp();
+  const { language, applications = [], draftApplications = [] } = useApp();
+  const { isAuthenticated, user } = useAuth();
   const displayedScheme = language === 'HI' ? getHindiScheme(scheme) : scheme;
   const windowStatus = getSchemeWindowStatus(scheme);
+
+  const isApplicant = Boolean(isAuthenticated && user?.role === 'APPLICANT');
+  const userDraft = isApplicant
+    ? draftApplications.find((a) => a.schemeId === scheme.id || a.schemeCode === scheme.code) ||
+      applications.find((a) => (a.schemeId === scheme.id || a.schemeCode === scheme.code) && a.status === 'DRAFT')
+    : undefined;
+
+  const userSubmittedApp = isApplicant
+    ? applications.find((a) => (a.schemeId === scheme.id || a.schemeCode === scheme.code) && a.status !== 'DRAFT')
+    : undefined;
 
   // Category-specific icons and colors
   const getCategoryIcon = () => {
@@ -55,7 +68,17 @@ export const SchemeCard: React.FC<SchemeCardProps> = ({ scheme, onOpenPreCheck }
           {displayedScheme.portalCategory}
         </span>
         
-        {windowStatus.state === 'OPEN' ? (
+        {userSubmittedApp ? (
+          <span className="inline-flex items-center gap-1 text-[11px] font-bold text-blue-900 bg-blue-100/90 px-2 py-0.5 rounded border border-blue-300 shadow-xs" title={`Application ID: ${userSubmittedApp.id}`}>
+            <CheckCircle className="w-3.5 h-3.5 text-blue-700" />
+            <span>Applied • {userSubmittedApp.status.replace(/_/g, ' ')}</span>
+          </span>
+        ) : userDraft ? (
+          <span className="inline-flex items-center gap-1 text-[11px] font-bold text-amber-900 bg-amber-100/90 px-2 py-0.5 rounded border border-amber-300 shadow-xs" title="You have an active draft application">
+            <Clock className="w-3.5 h-3.5 text-amber-700" />
+            <span>Draft in Progress</span>
+          </span>
+        ) : windowStatus.state === 'OPEN' ? (
           <span className="inline-flex items-center gap-1 text-[11px] font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200" title={windowStatus.message}>
             <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
             OPEN
@@ -135,6 +158,36 @@ export const SchemeCard: React.FC<SchemeCardProps> = ({ scheme, onOpenPreCheck }
             </div>
           ))}
         </div>
+        {/* Required Documents Checklist Preview */}
+        {scheme.requiredDocuments && scheme.requiredDocuments.length > 0 && (
+          <div className="bg-slate-50/70 rounded p-2.5 border border-slate-200 mb-3 space-y-1">
+            <div className="flex items-center justify-between text-[11px] font-bold text-slate-700">
+              <span className="flex items-center gap-1">
+                <FileText className="w-3.5 h-3.5 text-slate-500" />
+                <span>Required Documents:</span>
+              </span>
+              <span className="text-[10px] text-slate-500 font-normal">
+                {scheme.requiredDocuments.length} mandatory
+              </span>
+            </div>
+            <div className="flex flex-wrap gap-1 mt-1">
+              {scheme.requiredDocuments.slice(0, 3).map((doc, idx) => (
+                <span
+                  key={doc.id || doc.code || idx}
+                  className="text-[10px] bg-white text-slate-700 px-1.5 py-0.5 rounded border border-slate-200 truncate max-w-[145px]"
+                  title={doc.description || doc.name}
+                >
+                  {doc.name}
+                </span>
+              ))}
+              {scheme.requiredDocuments.length > 3 && (
+                <span className="text-[10px] text-blue-800 font-bold px-1 py-0.5">
+                  +{scheme.requiredDocuments.length - 3} more
+                </span>
+              )}
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Footer Actions */}
@@ -149,15 +202,35 @@ export const SchemeCard: React.FC<SchemeCardProps> = ({ scheme, onOpenPreCheck }
           <span>Check Eligibility</span>
         </button>
 
-        {/* View Details & Apply CTA */}
+        {/* View Details & Action CTA */}
         <div className="flex items-center gap-1.5">
           <Link
             to={`/schemes/${scheme.id}`}
             className="flex-1 sm:flex-none text-center text-xs font-medium text-slate-700 hover:text-slate-900 px-2.5 py-1.5 border border-slate-300 rounded bg-white hover:bg-slate-100 transition-colors"
+            title="View comprehensive scheme details, eligibility, benefits, and guidelines"
           >
-            Details
+            View Details
           </Link>
-          {windowStatus.isOpen ? (
+
+          {userDraft ? (
+            <Link
+              to={`/applicant/apply?scheme=${scheme.id}&draftId=${userDraft.id}`}
+              className="flex-1 sm:flex-none text-center text-xs font-bold text-slate-950 bg-amber-400 hover:bg-amber-500 px-3 py-1.5 rounded shadow-sm flex items-center justify-center gap-1 transition-colors"
+              title="Continue your saved draft application for this scheme"
+            >
+              <span>Continue Application</span>
+              <ArrowRight className="w-3 h-3" />
+            </Link>
+          ) : userSubmittedApp ? (
+            <Link
+              to="/applicant/status"
+              className="flex-1 sm:flex-none text-center text-xs font-bold text-white bg-blue-900 hover:bg-blue-950 px-3 py-1.5 rounded shadow-sm flex items-center justify-center gap-1 transition-colors"
+              title="View tracking and verification timeline for this application"
+            >
+              <span>Track Application</span>
+              <ArrowRight className="w-3 h-3" />
+            </Link>
+          ) : windowStatus.isOpen ? (
             <Link
               to={`/applicant/apply?scheme=${scheme.id}`}
               className="flex-1 sm:flex-none text-center text-xs font-bold text-white bg-[#0b2853] hover:bg-[#134685] px-3 py-1.5 rounded shadow-sm flex items-center justify-center gap-1 transition-colors"

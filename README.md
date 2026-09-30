@@ -115,3 +115,15 @@ src/       React frontend, layouts, pages, components, API client, and types
 backend/   FastAPI application, routes, schemas, services, and database setup
 public/    Static images and public assets
 ```
+## 📸 Application Tracking
+
+### Where Is My Application?
+
+
+Applicants can track the current stage of their individual scholarship or
+fellowship application and understand its progress through the workflow.
+
+The tracking interface provides visibility into application status,
+processing stages, and required actions.
+
+<img width="1810" height="843" alt="Screenshot 2026-09-30 145249" src="https://github.com/user-attachments/assets/2bd306c7-455a-4f2b-86a1-1a6f06a8f243" />
